@@ -1,0 +1,126 @@
+UNIT INFO
+
+These are the weapons that each unit has, and the number that is
+assigned to each weapon.  Weapon 0 is meant to be usable for
+counterattacks, while Weapon 1 may be more powerful but only usable
+as part of a chosen action.  This also has an alternate name for
+the units, so Infantry_P becomes Bazooka, Plane_S becomes Fighter
+Jet and Tank_S becomes AA Tank.  AA is short for Anti-Air.
+
+Infantry    : Infantry            Has Weapons: Weapon 0
+Infantry_P  : Bazooka             Has Weapons: Weapon 0 and Weapon 1
+Infantry_S  : Bike                Has Weapons: Weapon 0
+Infantry_T  : Sniper              Has Weapons: Weapon 0 and Weapon 1
+Artillery   : Light Artillery     Has Weapons: Weapon 1
+Artillery_P : Defensive Artillery Has Weapons: Weapon 0
+Artillery_S : AA Artillery        Has Weapons: Weapon 1
+Artillery_T : Stealth Artillery   Has Weapons: Weapon 1
+Tank        : Light Tank          Has Weapons: Weapon 0 and Weapon 1
+Tank_P      : Heavy Tank          Has Weapons: Weapon 0 and Weapon 1
+Tank_S      : AA Tank             Has Weapons: Weapon 0
+Tank_T      : Recon Tank          Has Weapons: Weapon 0 and Weapon 1
+Plane       : Prop Plane          Has Weapons: Weapon 0
+Plane_P     : Ground Bomber       Has Weapons: Weapon 1
+Plane_S     : Fighter Jet         Has Weapons: Weapon 0
+Plane_T     : Stealth Jet         Has Weapons: Weapon 0
+Supply      : Supply Truck        Has Weapons: No Weapons
+Supply_P    : Build Rig           Has Weapons: No Weapons
+Supply_S    : Amphi Transport     Has Weapons: No Weapons
+Supply_T    : Jammer              Has Weapons: No Weapons
+Copter      : Transport Copter    Has Weapons: No Weapons
+Copter_P    : Gunship Copter      Has Weapons: Weapon 0 and Weapon 1
+Copter_S    : Blitz Copter        Has Weapons: Weapon 0
+Copter_T    : Comm Copter         Has Weapons: No Weapons
+Boat        : Patrol Boat         Has Weapons: Weapon 0
+Boat_P      : Battleship          Has Weapons: Weapon 0
+Boat_S      : Cruiser             Has Weapons: Weapon 0 and Weapon 1
+Boat_T      : Submarine           Has Weapons: Weapon 0 and Weapon 1
+City        : City                Has Weapons: No Weapons
+Factory     : Factory             Has Weapons: No Weapons
+Airport     : Airport             Has Weapons: No Weapons
+Laboratory  : Laboratory          Has Weapons: No Weapons
+Castle      : Castle              Has Weapons: No Weapons
+Estate      : Estate              Has Weapons: No Weapons
+
+These are the kinds of weapon these units use, so you can know which
+receive animations to show when they attack.
+
+Infantry    : Infantry            Attack Kinds: Weapon 0: Machine_Gun
+Infantry_P  : Bazooka             Attack Kinds: Weapon 0: Handgun, Weapon 1: Rocket
+Infantry_S  : Bike                Attack Kinds: Weapon 0: Machine_Gun
+Infantry_T  : Sniper              Attack Kinds: Weapon 0: Handgun, Weapon 1: Handgun
+Artillery   : Light Artillery     Attack Kinds: Weapon 1: Long_Cannon
+Artillery_P : Defensive Artillery Attack Kinds: Weapon 0: Cannon
+Artillery_S : AA Artillery        Attack Kinds: Weapon 1: Arc_Missile
+Artillery_T : Stealth Artillery   Attack Kinds: Weapon 1: Arc_Missile
+Tank        : Light Tank          Attack Kinds: Weapon 0: Cannon, Weapon 1: Machine_Gun
+Tank_P      : Heavy Tank          Attack Kinds: Weapon 0: Cannon, Weapon 1: Machine_Gun
+Tank_S      : AA Tank             Attack Kinds: Weapon 0: Machine_Gun
+Tank_T      : Recon Tank          Attack Kinds: Weapon 0: Machine_Gun, Weapon 1: Cannon
+Plane       : Prop Plane          Attack Kinds: Weapon 0: Machine_Gun
+Plane_P     : Ground Bomber       Attack Kinds: Weapon 1: Bomb
+Plane_S     : Fighter Jet         Attack Kinds: Weapon 0: Rocket
+Plane_T     : Stealth Jet         Attack Kinds: Weapon 0: Rocket
+Supply      : Supply Truck        Attack Kinds: No Weapons
+Supply_P    : Build Rig           Attack Kinds: No Weapons
+Supply_S    : Amphi Transport     Attack Kinds: No Weapons
+Supply_T    : Jammer              Attack Kinds: No Weapons
+Copter      : Transport Copter    Attack Kinds: No Weapons
+Copter_P    : Gunship Copter      Attack Kinds: Weapon 0: Machine_Gun, Weapon 1: Rocket
+Copter_S    : Blitz Copter        Attack Kinds: Weapon 0: Machine_Gun
+Copter_T    : Comm Copter         Attack Kinds: No Weapons
+Boat        : Patrol Boat         Attack Kinds: Weapon 0: Machine_Gun
+Boat_P      : Battleship          Attack Kinds: Weapon 0: Long_Cannon
+Boat_S      : Cruiser             Attack Kinds: Weapon 0: Torpedo, Weapon 1: Arc_Missile
+Boat_T      : Submarine           Attack Kinds: Weapon 0: Torpedo, Weapon 1: Arc_Missile
+City        : City                Attack Kinds: No Weapons
+Factory     : Factory             Attack Kinds: No Weapons
+Airport     : Airport             Attack Kinds: No Weapons
+Laboratory  : Laboratory          Attack Kinds: No Weapons
+Castle      : Castle              Attack Kinds: No Weapons
+Estate      : Estate              Attack Kinds: No Weapons
+
+These are the receive strengths to use when a given unit attacks with a weapon.
+Mostly, the explosion size or the amount of sparks flying gets bigger as
+strength goes up. But for some, like Rockets, it doesn't change size, but rather
+timing -- the Infantry_P's Rocket is timed so that with a strength of 3, it hits
+at the right time.  Receive animations use the palette of the attacker, or 0 if
+there isn't an animation available in your palette.  They expect the defender to be
+facing in the direction of the attack (ready to counterattack, in some games).
+
+Infantry    : Infantry            Receive Strengths: Weapon 0: 1,    Weapon 1: none
+Infantry_P  : Bazooka             Receive Strengths: Weapon 0: 1,    Weapon 1: 3
+Infantry_S  : Bike                Receive Strengths: Weapon 0: 2,    Weapon 1: none
+Infantry_T  : Sniper              Receive Strengths: Weapon 0: 1,    Weapon 1: 1
+Artillery   : Light Artillery     Receive Strengths: Weapon 0: none, Weapon 1: 3
+Artillery_P : Defensive Artillery Receive Strengths: Weapon 0: 4,    Weapon 1: none
+Artillery_S : AA Artillery        Receive Strengths: Weapon 0: none, Weapon 1: 3
+Artillery_T : Stealth Artillery   Receive Strengths: Weapon 0: none, Weapon 1: 4
+Tank        : Light Tank          Receive Strengths: Weapon 0: 2,    Weapon 1: 1
+Tank_P      : Heavy Tank          Receive Strengths: Weapon 0: 4,    Weapon 1: 2
+Tank_S      : AA Tank             Receive Strengths: Weapon 0: 2,    Weapon 1: none
+Tank_T      : Recon Tank          Receive Strengths: Weapon 0: 1,    Weapon 1: 2
+Plane       : Prop Plane          Receive Strengths: Weapon 0: 2,    Weapon 1: none
+Plane_P     : Ground Bomber       Receive Strengths: Weapon 0: none, Weapon 1: 4
+Plane_S     : Fighter Jet         Receive Strengths: Weapon 0: 1,    Weapon 1: none
+Plane_T     : Stealth Jet         Receive Strengths: Weapon 0: 2,    Weapon 1: none
+Supply      : Supply Truck        Receive Strengths: Weapon 0: none, Weapon 1: none
+Supply_P    : Build Rig           Receive Strengths: Weapon 0: none, Weapon 1: none
+Supply_S    : Amphi Transport     Receive Strengths: Weapon 0: none, Weapon 1: none
+Supply_T    : Jammer              Receive Strengths: Weapon 0: none, Weapon 1: none
+Copter      : Transport Copter    Receive Strengths: Weapon 0: none, Weapon 1: none
+Copter_P    : Gunship Copter      Receive Strengths: Weapon 0: 2,    Weapon 1: 2
+Copter_S    : Blitz Copter        Receive Strengths: Weapon 0: 2,    Weapon 1: none
+Copter_T    : Comm Copter         Receive Strengths: Weapon 0: none, Weapon 1: none
+Boat        : Patrol Boat         Receive Strengths: Weapon 0: 2,    Weapon 1: none
+Boat_P      : Battleship          Receive Strengths: Weapon 0: 4,    Weapon 1: none
+Boat_S      : Cruiser             Receive Strengths: Weapon 0: 1,    Weapon 1: 3
+Boat_T      : Submarine           Receive Strengths: Weapon 0: 1,    Weapon 1: 4
+City        : City                Receive Strengths: Weapon 0: none, Weapon 1: none
+Factory     : Factory             Receive Strengths: Weapon 0: none, Weapon 1: none
+Airport     : Airport             Receive Strengths: Weapon 0: none, Weapon 1: none
+Laboratory  : Laboratory          Receive Strengths: Weapon 0: none, Weapon 1: none
+Castle      : Castle              Receive Strengths: Weapon 0: none, Weapon 1: none
+Estate      : Estate              Receive Strengths: Weapon 0: none, Weapon 1: none
+
+Enjoy!

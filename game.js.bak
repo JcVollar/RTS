@@ -1,0 +1,2108 @@
+"use strict";
+
+/* =========================================================================
+ * Iso RTS prototype
+ * -------------------------------------------------------------------------
+ * Structure is split into: CONFIG, world<->screen math, GameState (the part
+ * you would eventually sync over the network), Input, Camera, and Render.
+ * Keep game logic (GameState + update) free of DOM/canvas so it can later
+ * run on a server too.
+ * ========================================================================= */
+
+/* ----------------------------- CONFIG ---------------------------------- */
+const CONFIG = {
+  MAP_W: 160,          // tiles across   (RA2 maps top out ~ 200)
+  MAP_H: 160,          // tiles down
+  TILE_W: 64,          // iso tile width in px
+  TILE_H: 32,          // iso tile height in px
+  EDGE_PAN: 24,        // px from screen edge that triggers pan
+  DRAG_PAN_SPEED: 6,   // right-drag: map slide speed per px of cursor offset
+  PAN_SPEED: 900,      // px per second
+};
+
+const HALF_W = CONFIG.TILE_W / 2;
+const HALF_H = CONFIG.TILE_H / 2;
+
+// Hit chance by skill level (editable). Lv1 rookie .. Lv3 veteran.
+const ACCURACY = { 1: 0.25, 2: 0.50, 3: 0.70 };
+
+// Veterancy (editable): total kills to reach Lv2 and Lv3, and the health a
+// Lv3 veteran regenerates per second.
+const VETERANCY = { kills: [2, 5], regenPerSec: 0.3 };
+
+// Unit archetypes — the tuning table. Copy an entry, tweak the numbers, and
+// you have a brand-new unit type; every value here is meant to be changed.
+//   size     footprint in tiles (person 1 => 1x1, vehicle 2 => 2x2)
+//   speed    move speed in tiles/sec (per-unit opts.speed can override)
+//   radius   draw size in px
+//   maxHp    health
+//   view     detection range in tiles (how far it spots enemies)
+//   armor    damage class the unit takes hits as ("flesh", "heavy", ...)
+//   weapon.range      firing range in tiles
+//   weapon.damage     base hp removed per shot that hits
+//   weapon.burst      shots fired before reloading
+//   weapon.fireDelay  seconds between shots within a burst
+//   weapon.reload     seconds to wait after a burst
+//   weapon.vs         damage multiplier by the target's armor class
+const UNIT_TYPES = {
+  soldier: {
+    label: "Soldier", producer: "barracks",
+    size: 1, speed: 1.6, radius: 11, maxHp: 60, view: 8, armor: "flesh",
+    cost: 100, buildTime: 5,
+    weapon: { range: 5, damage: 6, burst: 12, fireDelay: 0.09, reload: 1.3,
+              vs: { flesh: 1.0, heavy: 0.4 } }, // rifles barely dent armor
+  },
+  seal: { // elite: ~25% more damage, tougher, and 10% faster than a soldier
+    label: "Seal", producer: "barracks",
+    size: 1, speed: 1.76, radius: 11, maxHp: 75, view: 9, armor: "flesh",
+    cost: 200, buildTime: 8, color: "#94e2d5",
+    weapon: { range: 6, damage: 8, burst: 12, fireDelay: 0.08, reload: 1.2,
+              vs: { flesh: 1.0, heavy: 0.45 } },
+  },
+  engineer: { // enables construction; a poor fighter; repairs buildings & tanks
+    label: "Engineer", producer: "barracks",
+    size: 1, speed: 1.8, radius: 11, maxHp: 50, view: 6, armor: "flesh",
+    cost: 100, buildTime: 5, color: "#fab387",
+    weapon: { range: 3, damage: 2, burst: 3, fireDelay: 0.18, reload: 2.2,
+              vs: { flesh: 0.6, heavy: 0.15 } },
+    repair: { rate: 40, targets: ["building", "vehicle"] }, // hp/sec when adjacent
+  },
+  firstaid: { // heals infantry when standing beside them
+    label: "First Aid", producer: "barracks",
+    size: 1, speed: 1.7, radius: 11, maxHp: 45, view: 6, armor: "flesh",
+    cost: 150, buildTime: 6, color: "#f5c2e7",
+    weapon: { range: 0, damage: 0, burst: 1, fireDelay: 0, reload: 1, vs: {} },
+    repair: { rate: 12, targets: ["infantry"] },
+  },
+  vehicle: {
+    label: "Tank", producer: "garage",
+    size: 2, speed: 3.2, radius: 18, maxHp: 220, view: 10, armor: "heavy",
+    cost: 700, buildTime: 10,
+    weapon: { range: 7, damage: 40, burst: 1, fireDelay: 0, reload: 4.5,
+              vs: { flesh: 1.1, heavy: 2.0 } }, // +10% vs people, brutal vs armor
+  },
+};
+
+// Units you can train, in menu order (each needs its producer building).
+const UNIT_MENU = ["engineer", "soldier", "seal", "firstaid", "vehicle"];
+
+const RETALIATE_TIME = 4; // seconds a unit stays provoked after being shot
+
+// Building archetypes (editable). size = footprint (NxN tiles). power > 0
+// produces, < 0 consumes; needsPower buildings run "unpowered" during a deficit.
+// cost is in credits. hp lets enemies destroy them.
+const BUILDING_TYPES = {
+  main:     { name: "Main House",  size: 3, hp: 1500, cost: 0,   power: 50,  needsPower: false, buildTime: 6, color: "#b4befe" },
+  barracks: { name: "Barracks",    size: 2, hp: 800,  cost: 400, power: -40, needsPower: true,  buildTime: 4, color: "#f9e2af", produces: "infantry" },
+  garage:   { name: "Garage",      size: 3, hp: 900,  cost: 600, power: -50, needsPower: true,  buildTime: 5, color: "#89b4fa", produces: "vehicle" },
+  power:    { name: "Power Plant", size: 2, hp: 600,  cost: 300, power: 100, needsPower: false, buildTime: 3, color: "#a6e3a1" },
+  tower:    { name: "Guard Tower", size: 1, hp: 700,  cost: 500, power: -20, needsPower: true,  buildTime: 4, color: "#eba0ac", tower: true, cap: 5 }, // 1x1, tall
+  gate:     { name: "Wall Gate",   size: 4, hp: 600,  cost: 150, power: 0,   needsPower: false, buildTime: 2, color: "#7f849c", gate: true }, // 4x1, rotatable, friendly units pass
+  wall:     { name: "Wall",        size: 1, hp: 400,  cost: 25,  power: 0,   needsPower: false, buildTime: 1, color: "#9399b2" },
+};
+
+// Order shown in the right-hand build menu.
+const BUILD_MENU = ["main", "barracks", "garage", "power", "tower", "gate", "wall"];
+
+// Economy knobs. buildRadius = max tile gap a new building may sit from an
+// existing one (must be within this many squares of the base).
+const ECONOMY = { startCredits: 3000, buildRadius: 4 };
+
+/* --------------------------- ISO MATH ---------------------------------- */
+// Tile (col,row) center -> world pixel space (before camera).
+function tileToWorld(tx, ty) {
+  return {
+    x: (tx - ty) * HALF_W,
+    y: (tx + ty) * HALF_H,
+  };
+}
+
+// World pixel space -> fractional tile coords.
+function worldToTile(wx, wy) {
+  const tx = (wx / HALF_W + wy / HALF_H) / 2;
+  const ty = (wy / HALF_H - wx / HALF_W) / 2;
+  return { tx, ty };
+}
+
+/* --------------------------- GAME STATE --------------------------------- */
+// Pure data + logic. No canvas here on purpose.
+const state = {
+  map: [],             // map[y][x] = terrain id
+  units: [],
+  buildings: [],
+  effects: [],         // transient visuals (tracers)
+  blocked: new Set(),  // tile keys occupied by buildings (pathing obstacles)
+  gateTiles: new Set(),// blocked tiles that friendly units may pass through
+  credits: 0,
+  placing: null,       // { type, rot } while choosing where to place a building
+  settingRally: null,  // building whose rally point is being dragged
+  queues: { barracks: [], garage: [] },   // per-producer training queues (max 20)
+  progress: { barracks: 0, garage: 0 },   // 0..1 progress on each queue's front
+  selectedBuilding: null,
+  nextId: 1,
+};
+
+function buildMap() {
+  for (let y = 0; y < CONFIG.MAP_H; y++) {
+    const row = [];
+    for (let x = 0; x < CONFIG.MAP_W; x++) {
+      // Layered sine "noise" makes organic dirt patches instead of speckles.
+      const v = Math.sin(x * 0.15) + Math.cos(y * 0.15)
+              + Math.sin((x + y) * 0.08) * 1.4
+              + Math.sin((x - y) * 0.11) * 0.8;
+      row.push(v > 1.6 ? 1 : 0); // 1 = dirt, 0 = grass
+    }
+    state.map.push(row);
+  }
+}
+
+function spawnUnit(tx, ty, opts = {}) {
+  const type = opts.type || "person";
+  const def = UNIT_TYPES[type];
+  const u = {
+    id: state.nextId++,
+    type,
+    size: def.size,       // footprint is size×size tiles (person 1, vehicle 2)
+    tx, ty,               // anchor = top-left tile of the footprint
+    targetTx: tx,         // current waypoint being moved toward
+    targetTy: ty,
+    goalTx: tx,           // final destination of the current path
+    goalTy: ty,
+    path: [],             // remaining waypoints (tile anchors) from A*
+    selected: false,
+    radius: def.radius,
+    facing: 2.2,          // barrel angle (screen-space radians)
+    hp: def.maxHp,
+    maxHp: def.maxHp,
+    view: opts.view || def.view,        // detection range (tiles)
+    armor: opts.armor || def.armor,     // damage class taken as
+    weapon: opts.weapon || def.weapon,  // weapon template (read-only)
+    level: opts.level || 1,             // 1..3 skill -> ACCURACY
+    team: opts.team || "player",
+    color: opts.color || def.color || (opts.team === "enemy" ? "#74c7ec" : "#f38ba8"),
+    speed: opts.speed || def.speed,     // per-unit override wins
+    // combat runtime state
+    target: null,         // current auto-acquired or forced target
+    forcedTarget: null,   // explicit attack order (overrides auto-acquire)
+    attackAngle: null,    // assigned slot around a forced target (arc formation)
+    commandedMove: false, // moving under a user order (overrides auto-stop)
+    cooldown: 0,          // seconds until next shot allowed
+    burstCount: 0,        // shots fired in the current burst
+    muzzle: 0,            // muzzle-flash timer
+    aiming: false,        // locked onto a target this frame (barrel tracks it)
+    retaliateTarget: null,// who last shot us (auto-return-fire)
+    retaliateTimer: 0,    // seconds of provoked aggression remaining
+    repair: def.repair || null,   // healer ability (engineer / first aid)
+    repairTarget: null,   // friendly unit/building being repaired
+    repairing: false,     // actively repairing this frame (for the visual)
+    enterTarget: null,    // Guard Tower this unit is walking into
+    kills: 0,             // confirmed kills -> veterancy
+    levelFlash: 0,        // promotion pulse timer
+    // AI (enemies only)
+    stationary: opts.stationary || false,
+    wanderRadius: opts.wanderRadius || 4,
+    wanderTimer: opts.wanderTimer || 0,
+  };
+  state.units.push(u);
+  return u;
+}
+
+// Scatter 10-20 enemies across the map, away from the player's start.
+function spawnEnemies() {
+  const count = 10 + Math.floor(Math.random() * 11); // 10..20
+  for (let i = 0; i < count; i++) {
+    let tx, ty;
+    do {
+      tx = 5 + Math.floor(Math.random() * (CONFIG.MAP_W - 10));
+      ty = 5 + Math.floor(Math.random() * (CONFIG.MAP_H - 10));
+    } while (Math.hypot(tx - 64, ty - 64) < 10); // keep clear of the player
+    spawnUnit(tx, ty, {
+      team: "enemy",                    // blue by default (see spawnUnit)
+      type: Math.random() < 0.3 ? "vehicle" : "soldier",
+      level: 1 + Math.floor(Math.random() * 3), // 1..3
+      stationary: Math.random() < 0.4,  // ~40% just stand still
+      wanderRadius: 3 + Math.floor(Math.random() * 4),
+      wanderTimer: Math.random() * 4,   // desync their first move
+    });
+  }
+}
+
+// Route a unit to (gx,gy) via A*, following waypoints around buildings.
+function issueMove(unit, gx, gy) {
+  gx = clamp(gx, 0, CONFIG.MAP_W - unit.size);
+  gy = clamp(gy, 0, CONFIG.MAP_H - unit.size);
+  if (unit.goalTx === gx && unit.goalTy === gy) return; // already routing there
+  unit.goalTx = gx; unit.goalTy = gy;
+  const path = findPath(unit, gx, gy);
+  unit.path = path;
+  if (path.length) {
+    unit.targetTx = path[0].x; unit.targetTy = path[0].y;
+  } else {
+    // No route (blocked/unreachable): stay put.
+    unit.targetTx = Math.round(unit.tx);
+    unit.targetTy = Math.round(unit.ty);
+  }
+}
+
+// Stop a unit exactly where it stands (used when it halts to fire).
+function stopUnit(unit) {
+  unit.path = [];
+  unit.targetTx = unit.tx; unit.targetTy = unit.ty;
+  unit.goalTx = Math.round(unit.tx); unit.goalTy = Math.round(unit.ty);
+}
+
+function tileKey(x, y) { return x + "," + y; }
+
+// Mark every tile a size×size footprint at (ax,ay) covers into `set`.
+function markFootprint(ax, ay, size, set) {
+  for (let dy = 0; dy < size; dy++)
+    for (let dx = 0; dx < size; dx++)
+      set.add(tileKey(ax + dx, ay + dy));
+}
+
+// Can a size×size footprint sit at (ax,ay)? In bounds and no tile taken.
+function footprintFree(ax, ay, size, occupied) {
+  if (ax < 0 || ay < 0 || ax + size > CONFIG.MAP_W || ay + size > CONFIG.MAP_H) return false;
+  for (let dy = 0; dy < size; dy++)
+    for (let dx = 0; dx < size; dx++)
+      if (occupied.has(tileKey(ax + dx, ay + dy))) return false;
+  return true;
+}
+
+// Tiles that units are resting on / heading to (their full footprints).
+function occupiedTiles(exclude) {
+  const set = new Set();
+  for (const u of state.units) {
+    if (exclude && exclude.has(u)) continue;
+    markFootprint(Math.round(u.targetTx), Math.round(u.targetTy), u.size, set);
+  }
+  return set;
+}
+
+// Move a group to (cx,cy), giving each unit a distinct free destination tile
+// found by spiralling outward from the click. One unit per resting tile.
+function assignGroupMove(group, cx, cy) {
+  const occupied = occupiedTiles(new Set(group)); // tiles held by units NOT moving
+  const taken = new Set();                          // footprints claimed this order
+  const maxR = Math.max(CONFIG.MAP_W, CONFIG.MAP_H);
+
+  // Closest units claim the closest spots for a natural-looking spread.
+  const ordered = group.slice().sort((a, b) =>
+    Math.hypot(a.tx - cx, a.ty - cy) - Math.hypot(b.tx - cx, b.ty - cy));
+
+  for (const u of ordered) {
+    // Center the footprint roughly on the clicked tile.
+    const ax0 = cx - (u.size >> 1);
+    const ay0 = cy - (u.size >> 1);
+    let placed = null;
+    for (let r = 0; r <= maxR && !placed; r++) {
+      for (let dy = -r; dy <= r && !placed; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue; // ring edge only
+          const ax = ax0 + dx, ay = ay0 + dy;
+          if (footprintFree(ax, ay, u.size, occupied) &&
+              footprintFree(ax, ay, u.size, taken) &&
+              walkable(ax, ay, u.size, u.team === "player")) { // not on a building
+            placed = { x: ax, y: ay };
+            break;
+          }
+        }
+      }
+    }
+    const spot = placed || { x: ax0, y: ay0 };
+    markFootprint(spot.x, spot.y, u.size, taken);
+    issueMove(u, spot.x, spot.y);
+    u.commandedMove = true; // user-ordered move overrides auto-stop until arrival
+  }
+}
+
+// Advance movement by dt seconds, following each unit's A* path waypoints.
+function updateWorld(dt) {
+  for (const u of state.units) {
+    const dx = u.targetTx - u.tx;
+    const dy = u.targetTy - u.ty;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 0.02) {
+      u.tx = u.targetTx; u.ty = u.targetTy;
+      if (u.path && u.path.length) {
+        u.path.shift();                     // reached this waypoint
+        if (u.path.length) {
+          u.targetTx = u.path[0].x; u.targetTy = u.path[0].y;
+        } else {
+          u.commandedMove = false;          // arrived at the final goal
+        }
+      } else {
+        u.commandedMove = false;
+      }
+      continue;
+    }
+    // Face the movement direction, unless we're locked onto a combat target.
+    if (!u.aiming) {
+      u.facing = Math.atan2((dx + dy) * HALF_H, (dx - dy) * HALF_W);
+    }
+    const step = Math.min(dist, u.speed * dt);
+    u.tx += (dx / dist) * step;
+    u.ty += (dy / dist) * step;
+  }
+}
+
+// Enemy AI: chase a detected player, otherwise idle/wander.
+function updateAI(dt) {
+  for (const u of state.units) {
+    if (u.team !== "enemy") continue;
+
+    // If we've spotted a target, close to firing range. Once in range,
+    // updateCombat has already halted us and is firing.
+    if (u.target && u.target.hp > 0 && unitDist(u, u.target) <= u.view) {
+      // Close in if out of range, or reposition if a wall/house blocks the shot.
+      if (unitDist(u, u.target) > u.weapon.range || !hasLineOfSight(u, u.target)) {
+        const t = approachTile(u, u.target);
+        issueMove(u, t.x, t.y); // issueMove dedupes when the goal is unchanged
+      }
+      continue;
+    }
+
+    if (u.stationary) continue;
+
+    // Otherwise wander.
+    const reached = Math.hypot(u.targetTx - u.tx, u.targetTy - u.ty) < 0.05;
+    u.wanderTimer -= dt;
+    if (reached && u.wanderTimer <= 0) {
+      const occupied = occupiedTiles(new Set([u])); // every footprint but our own
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const nx = Math.round(u.tx + (Math.random() * 2 - 1) * u.wanderRadius);
+        const ny = Math.round(u.ty + (Math.random() * 2 - 1) * u.wanderRadius);
+        if (footprintFree(nx, ny, u.size, occupied) && walkable(nx, ny, u.size)) {
+          issueMove(u, nx, ny); break;
+        }
+      }
+      u.wanderTimer = 2 + Math.random() * 4; // pause 2-6s before next move
+    }
+  }
+}
+
+/* ----------------------------- COMBAT ---------------------------------- */
+// Footprint half-extents (buildings may be non-square via bw/bh).
+function halfW(o) { return ((o.bw || o.size) - 1) / 2; }
+function halfH(o) { return ((o.bh || o.size) - 1) / 2; }
+
+// World-space center of a unit/building (footprint-aware).
+function unitWorld(u) {
+  return tileToWorld(u.tx + halfW(u), u.ty + halfH(u));
+}
+
+// Distance between two objects in tiles (center to center).
+function unitDist(a, b) {
+  return Math.hypot((a.tx + halfW(a)) - (b.tx + halfW(b)),
+                    (a.ty + halfH(a)) - (b.ty + halfH(b)));
+}
+
+function angleTo(a, b) {
+  const wa = unitWorld(a), wb = unitWorld(b);
+  return Math.atan2(wb.y - wa.y, wb.x - wa.x);
+}
+
+// Nearest hostile within maxRange tiles, or null. Enemies also target buildings.
+function nearestHostile(u, maxRange) {
+  let best = null, bestD = Infinity;
+  for (const o of state.units) {
+    if (o.team === u.team || o.hp <= 0) continue;
+    const d = unitDist(u, o);
+    if (d <= maxRange && d < bestD) { bestD = d; best = o; }
+  }
+  if (u.team !== "player") {
+    for (const b of state.buildings) {
+      if (b.hp <= 0) continue;
+      const d = unitDist(u, b);
+      if (d <= maxRange && d < bestD) { bestD = d; best = b; }
+    }
+  }
+  return best;
+}
+
+// A tile to stand on so `u` is just inside weapon range of `target`.
+function approachTile(u, target) {
+  const uc = (u.size - 1) / 2, tc = (target.size - 1) / 2;
+  const ux = u.tx + uc, uy = u.ty + uc;
+  const tx = target.tx + tc, ty = target.ty + tc;
+  const dx = ux - tx, dy = uy - ty;
+  const d = Math.hypot(dx, dy) || 1;
+  const stand = Math.max(1, u.weapon.range * 0.8);
+  return {
+    x: Math.round(tx + (dx / d) * stand - uc),
+    y: Math.round(ty + (dy / d) * stand - tc),
+  };
+}
+
+// Where `u` should stand when attacking `target`: at its assigned slot angle
+// (arc formation) and a fixed standoff, so a group rings the target evenly.
+function attackStandTile(u, target) {
+  const tc = (target.size - 1) / 2, uc = (u.size - 1) / 2;
+  const tcx = target.tx + tc, tcy = target.ty + tc;
+  const standoff = Math.max(1.2, u.weapon.range * 0.85);
+  let ang = u.attackAngle;
+  if (ang == null) ang = Math.atan2((u.ty + uc) - tcy, (u.tx + uc) - tcx);
+  return {
+    x: clamp(Math.round(tcx + Math.cos(ang) * standoff - uc), 0, CONFIG.MAP_W - u.size),
+    y: clamp(Math.round(tcy + Math.sin(ang) * standoff - uc), 0, CONFIG.MAP_H - u.size),
+  };
+}
+
+// Credit a kill to the shooter and promote it if it crosses a veterancy tier.
+function addKill(shooter) {
+  shooter.kills++;
+  let lvl = 1;
+  if (shooter.kills >= VETERANCY.kills[1]) lvl = 3;
+  else if (shooter.kills >= VETERANCY.kills[0]) lvl = 2;
+  if (lvl > shooter.level) {
+    shooter.level = lvl;
+    shooter.levelFlash = 0.6; // gold promotion pulse
+  }
+}
+
+// Fire one shot: roll to hit, apply damage, schedule the next shot, spawn tracer.
+function fireShot(u, target) {
+  const wpn = u.weapon;
+  u.burstCount++;
+  if (u.burstCount >= wpn.burst) { u.burstCount = 0; u.cooldown = wpn.reload; }
+  else { u.cooldown = wpn.fireDelay; }
+  u.muzzle = 0.05;
+
+  const hit = Math.random() < (ACCURACY[u.level] || 0.25);
+  if (hit) {
+    const mult = (wpn.vs && wpn.vs[target.armor] != null) ? wpn.vs[target.armor] : 1;
+    target.hp -= wpn.damage * mult;
+    if (target.hp <= 0) addKill(u);
+    else if (!target.isBuilding) {           // provoke return fire
+      target.retaliateTarget = u;
+      target.retaliateTimer = RETALIATE_TIME;
+    }
+  }
+
+  // Tracer (world coords). A miss scatters the endpoint so you can see it.
+  const a = unitWorld(u), b = unitWorld(target);
+  const ex = b.x + (hit ? 0 : (Math.random() * 2 - 1) * 22);
+  const ey = b.y + (hit ? 0 : (Math.random() * 2 - 1) * 22);
+  state.effects.push({ x1: a.x, y1: a.y - 12, x2: ex, y2: ey - 12, life: 0.08, hit });
+}
+
+function updateCombat(dt) {
+  for (const u of state.units) {
+    u.aiming = false;
+    if (u.muzzle > 0) u.muzzle -= dt;
+    if (u.cooldown > 0) u.cooldown -= dt;
+    if (u.levelFlash > 0) u.levelFlash -= dt;
+    if (u.retaliateTimer > 0) u.retaliateTimer -= dt;
+    // Lv3 veterans self-heal.
+    if (u.level >= 3 && u.hp < u.maxHp) {
+      u.hp = Math.min(u.maxHp, u.hp + VETERANCY.regenPerSec * dt);
+    }
+
+    if (u.repairTarget || u.enterTarget) continue; // busy on a support/garrison order
+
+    const provoked = u.retaliateTimer > 0 && u.retaliateTarget && u.retaliateTarget.hp > 0;
+
+    // Pick a target: explicit attack order > the unit that just shot us > auto-acquire.
+    let t = null;
+    if (u.forcedTarget && u.forcedTarget.hp > 0) {
+      t = u.forcedTarget;
+    } else {
+      u.forcedTarget = null;
+      u.attackAngle = null;
+      if (provoked) {
+        t = u.retaliateTarget;      // return fire even if the attacker is beyond view
+      } else {
+        u.retaliateTarget = null;
+        let a = u.target;
+        if (!a || a.hp <= 0 || a.team === u.team || unitDist(u, a) > u.view) a = null;
+        if (!a) a = nearestHostile(u, u.view);
+        t = a;
+      }
+    }
+    u.target = t;
+    if (!t) continue;
+
+    const d = unitDist(u, t);
+    // Can shoot only if in range AND nothing (wall/house) blocks the line.
+    const canShoot = d <= u.weapon.range && hasLineOfSight(u, t);
+    if (canShoot) {
+      u.aiming = true;          // barrel tracks the target; movement won't override
+      u.facing = angleTo(u, t);
+      if (u.cooldown <= 0) fireShot(u, t);
+    }
+
+    if (u.forcedTarget) {
+      if (canShoot) {
+        stopUnit(u);            // in range with a clear shot: freeze and fire
+        u.commandedMove = false;
+      } else {
+        // Out of range or blocked: advance (pathing routes around walls/houses).
+        const stand = attackStandTile(u, t);
+        issueMove(u, stand.x, stand.y);
+        u.commandedMove = true;
+      }
+    } else if (canShoot) {
+      // Clear shot, no explicit order: stop and fire — even mid-move if we're
+      // being shot at (return fire interrupts a plain move order).
+      if (!u.commandedMove || provoked) stopUnit(u);
+    } else if (provoked && u.weapon.range > 0) {
+      // Being shot but can't hit back yet: advance to close in / clear the line.
+      const stand = approachTile(u, t);
+      issueMove(u, stand.x, stand.y);
+      u.commandedMove = true;
+    }
+  }
+
+  // Guard Towers fire with their garrison: over walls, at +20% range.
+  for (const tower of state.buildings) {
+    if (!tower.built || !tower.garrison || !tower.garrison.length) continue;
+    for (const g of tower.garrison) {
+      if (g.cooldown > 0) g.cooldown -= dt;
+      const range = g.weapon.range * 1.2;
+      const t = nearestHostile(g, range);
+      if (t && unitDist(g, t) <= range) {   // no LOS check: elevated position
+        g.facing = angleTo(g, t);
+        if (g.cooldown <= 0) fireShot(g, t);
+      }
+    }
+  }
+
+  // Remove the dead.
+  if (state.units.some(u => u.hp <= 0)) {
+    state.units = state.units.filter(u => u.hp > 0);
+  }
+  if (state.buildings.some(b => b.hp <= 0)) {
+    for (const b of state.buildings) if (b.hp <= 0) ejectGarrison(b); // survivors spill out
+    state.buildings = state.buildings.filter(b => b.hp > 0);
+    if (state.selectedBuilding && !state.buildings.includes(state.selectedBuilding)) {
+      state.selectedBuilding = null;
+    }
+    rebuildBlocked(); // freed tiles become walkable again
+  }
+}
+
+function updateEffects(dt) {
+  for (const e of state.effects) e.life -= dt;
+  if (state.effects.length) state.effects = state.effects.filter(e => e.life > 0);
+}
+
+/* ------------------------- BUILDINGS + ECONOMY ------------------------- */
+function markRect(ax, ay, w, h, set) {
+  for (let dy = 0; dy < h; dy++)
+    for (let dx = 0; dx < w; dx++)
+      set.add(tileKey(ax + dx, ay + dy));
+}
+
+function rebuildBlocked() {
+  state.blocked = new Set();
+  state.gateTiles = new Set();
+  for (const b of state.buildings) {
+    markRect(b.tx, b.ty, b.bw, b.bh, state.blocked);
+    if (b.gate) markRect(b.tx, b.ty, b.bw, b.bh, state.gateTiles); // friendlies pass
+  }
+}
+
+function powerBalance() {
+  let produced = 0, consumed = 0;
+  for (const b of state.buildings) {
+    if (!b.built) continue; // no power until construction finishes
+    if (b.power > 0) produced += b.power; else consumed += -b.power;
+  }
+  return { produced, consumed };
+}
+function isLowPower() { const p = powerBalance(); return p.consumed > p.produced; }
+
+function hasEngineer() {
+  return state.units.some(u => u.team === "player" && u.type === "engineer");
+}
+function hasBuiltBarracks() {
+  return state.buildings.some(b => b.type === "barracks" && b.built && b.hp > 0);
+}
+// Is there a built producer building of the given type ("barracks"/"garage")?
+function hasBuiltProducer(ptype) {
+  return state.buildings.some(b => b.type === ptype && b.built && b.hp > 0);
+}
+function constructingOfType(type) {
+  return state.buildings.some(b => b.type === type && !b.built);
+}
+function cap(s) { return s ? s[0].toUpperCase() + s.slice(1) : s; }
+
+// Footprint dimensions for a building type at a rotation (gates are 4x1 / 1x4).
+function buildingDims(type, rot) {
+  const def = BUILDING_TYPES[type];
+  if (def.gate) return (rot % 2 === 0) ? { w: 4, h: 1 } : { w: 1, h: 4 };
+  return { w: def.size, h: def.size };
+}
+
+// Anchor (top-left tile) for a w×h building centered on the cursor tile.
+function cursorBuildAnchor(cx, cy, w, h) {
+  const wp = screenToWorld(cx, cy);
+  const t = worldToTile(wp.x, wp.y);
+  return { ax: Math.round(t.tx) - (w >> 1), ay: Math.round(t.ty) - (h >> 1) };
+}
+
+// Can `type` (rotation `rot`) be placed at (ax,ay)? In bounds, clear, and within
+// build radius (footprint edge to edge) of an existing building / an engineer.
+function placementValid(type, ax, ay, rot) {
+  const { w, h } = buildingDims(type, rot);
+  if (ax < 0 || ay < 0 || ax + w > CONFIG.MAP_W || ay + h > CONFIG.MAP_H) return false;
+  for (let dy = 0; dy < h; dy++)
+    for (let dx = 0; dx < w; dx++)
+      if (state.blocked.has(tileKey(ax + dx, ay + dy))) return false;
+  for (const u of state.units) {                 // don't bury a unit
+    const ux = Math.round(u.tx), uy = Math.round(u.ty);
+    if (ux + u.size > ax && ux < ax + w && uy + u.size > ay && uy < ay + h) return false;
+  }
+  if (state.buildings.length) {
+    for (const b of state.buildings) {
+      if (rectGap(ax, ay, w, h, b.tx, b.ty, b.bw, b.bh) <= ECONOMY.buildRadius) return true;
+    }
+    return false;
+  }
+  const cx = ax + w / 2, cy = ay + h / 2;
+  for (const u of state.units) {
+    if (u.team === "player" && u.type === "engineer" &&
+        Math.hypot((u.tx + 0.5) - cx, (u.ty + 0.5) - cy) <= ECONOMY.buildRadius) return true;
+  }
+  return false;
+}
+
+// Chebyshev tile gap between two axis-aligned footprints (0 = touching).
+function rectGap(ax, ay, aw, ah, bx, by, bw, bh) {
+  const gx = Math.max(0, ax - (bx + bw - 1), bx - (ax + aw - 1));
+  const gy = Math.max(0, ay - (by + bh - 1), by - (ay + ah - 1));
+  return Math.max(gx, gy);
+}
+
+function placeBuilding(type, ax, ay, rot) {
+  const def = BUILDING_TYPES[type];
+  const { w, h } = buildingDims(type, rot);
+  state.buildings.push({
+    id: state.nextId++, isBuilding: true, type, name: def.name, team: "player",
+    tx: ax, ty: ay, bw: w, bh: h, size: Math.max(w, h),
+    hp: def.hp, maxHp: def.hp, armor: "heavy",
+    power: def.power, needsPower: def.needsPower, color: def.color,
+    built: false, progress: 0, buildTime: def.buildTime, cost: def.cost,
+    tower: !!def.tower, cap: def.cap || 0, garrison: def.tower ? [] : null,
+    gate: !!def.gate, rally: null,
+  });
+  rebuildBlocked();
+}
+
+// Try to place the currently-selected building at the cursor. Cost is paid
+// over time during construction, so we don't charge here.
+function tryPlaceAtCursor(cx, cy) {
+  const type = state.placing.type, rot = state.placing.rot || 0;
+  const chainable = (type === "wall" || type === "gate");
+  if (!chainable && constructingOfType(type)) return; // one of each at a time
+  const { w, h } = buildingDims(type, rot);
+  const { ax, ay } = cursorBuildAnchor(cx, cy, w, h);
+  if (!placementValid(type, ax, ay, rot)) return;
+  placeBuilding(type, ax, ay, rot);
+  if (!chainable) state.placing = null; // keep placing walls/gates for chaining
+}
+
+/* --------------------------- PRODUCTION -------------------------------- */
+// Queue a unit for training at its producer building (max 20 per queue).
+function queueUnit(type) {
+  const producer = UNIT_TYPES[type].producer;
+  if (!producer || !hasBuiltProducer(producer)) return;
+  if (state.queues[producer].length >= 20) return;
+  state.queues[producer].push(type);
+}
+
+// Charge `rate = cost/time` credits per second and return the progress made
+// this frame; free items advance purely by time; a broke player stalls.
+function payProgress(cost, buildTime, dt) {
+  if (cost <= 0) return dt / buildTime;
+  const pay = Math.min((cost / buildTime) * dt, state.credits);
+  state.credits -= pay;
+  return pay / cost;
+}
+
+// Advance building construction and every producer queue, spending credits.
+function updateProduction(dt) {
+  for (const b of state.buildings) {
+    if (b.built) continue;
+    b.progress = Math.min(1, b.progress + payProgress(b.cost, b.buildTime, dt));
+    if (b.progress >= 1) b.built = true;
+  }
+
+  for (const producer of Object.keys(state.queues)) {
+    const q = state.queues[producer];
+    if (q.length && hasBuiltProducer(producer)) {
+      const def = UNIT_TYPES[q[0]];
+      state.progress[producer] += payProgress(def.cost || 0, def.buildTime || 5, dt);
+      if (state.progress[producer] >= 1) {
+        if (spawnProducedUnit(q[0], producer)) {
+          q.shift();
+          state.progress[producer] = 0;
+        } else {
+          state.progress[producer] = 1; // done, but no room yet — wait for space
+        }
+      }
+    } else {
+      state.progress[producer] = 0;
+    }
+  }
+}
+
+// A free, walkable, unoccupied anchor for a `size` footprint just outside a
+// building, or null.
+function freeTileAround(b, size = 1) {
+  const cx = b.tx + b.size / 2, cy = b.ty + b.size / 2;
+  for (let r = Math.ceil(b.size / 2); r < 16; r++) {
+    for (let dy = -r; dy <= r; dy++)
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = Math.round(cx + dx), y = Math.round(cy + dy);
+        if (walkable(x, y, size, true) && !footprintHasUnit(x, y, size)) return { x, y };
+      }
+  }
+  return null;
+}
+function footprintHasUnit(ax, ay, size) {
+  for (const u of state.units) {
+    const ux = Math.round(u.tx), uy = Math.round(u.ty);
+    if (ux + u.size > ax && ux < ax + size && uy + u.size > ay && uy < ay + size) return true;
+  }
+  return false;
+}
+
+// Spawn a finished unit on a free tile around its producer. Returns success.
+function spawnProducedUnit(type, producer) {
+  const bld = state.buildings.find(b => b.type === producer && b.built);
+  if (!bld) return false;
+  const spot = freeTileAround(bld, UNIT_TYPES[type].size);
+  if (!spot) return false;
+  const u = spawnUnit(spot.x, spot.y, { type });
+  if (bld.rally) { issueMove(u, bld.rally.x, bld.rally.y); u.commandedMove = true; }
+  return true;
+}
+// Sell a building for half its cost (refunds credits, frees the tiles).
+function sellBuilding(b) {
+  const refund = Math.floor((b.cost || 0) * 0.5);
+  state.credits += refund;
+  ejectGarrison(b); // any garrisoned troops spill out first
+  state.buildings = state.buildings.filter(x => x !== b);
+  if (state.selectedBuilding === b) state.selectedBuilding = null;
+  rebuildBlocked();
+}
+
+/* -------------------------- SUPPORT (repair) --------------------------- */
+// Category a healer target falls into.
+function unitCategory(t) {
+  if (t.isBuilding) return "building";
+  if (t.type === "vehicle") return "vehicle";
+  return "infantry";
+}
+function canRepair(healer, t) {
+  return healer.repair && t.team === "player" && t !== healer &&
+         healer.repair.targets.includes(unitCategory(t));
+}
+
+// A tile just outside the target's footprint, nearest to the healer.
+function besideTile(u, target) {
+  const uc = (u.size - 1) / 2, tc = (target.size - 1) / 2;
+  const tx = target.tx + tc, ty = target.ty + tc;
+  let dx = (u.tx + uc) - tx, dy = (u.ty + uc) - ty;
+  const d = Math.hypot(dx, dy) || 1;
+  const stand = tc + 1;
+  return {
+    x: clamp(Math.round(tx + (dx / d) * stand - uc), 0, CONFIG.MAP_W - u.size),
+    y: clamp(Math.round(ty + (dy / d) * stand - uc), 0, CONFIG.MAP_H - u.size),
+  };
+}
+
+// Engineers/medics repair; garrison-bound troops walk into their tower.
+function updateSupport(dt) {
+  const toGarrison = [];
+  for (const u of state.units) {
+    u.repairing = false;
+
+    // Heading into a Guard Tower.
+    if (u.enterTarget) {
+      const tw = u.enterTarget;
+      if (!tw.tower || tw.hp <= 0 || !state.buildings.includes(tw) || tw.garrison.length >= tw.cap) {
+        u.enterTarget = null;
+      } else if (unitDist(u, tw) <= (u.size + tw.size) / 2 + 1.0) {
+        toGarrison.push([tw, u]);           // reached it — garrison after the loop
+      } else {
+        const spot = besideTile(u, tw);
+        issueMove(u, spot.x, spot.y);
+        u.commandedMove = true;
+      }
+      continue;
+    }
+
+    if (!u.repairTarget) continue;
+    const t = u.repairTarget;
+    const alive = t.hp > 0 && (t.isBuilding ? state.buildings.includes(t) : state.units.includes(t));
+    if (!alive || t.hp >= t.maxHp) { u.repairTarget = null; continue; }
+
+    const thresh = (u.size + t.size) / 2 + 0.7; // "beside" it
+    if (unitDist(u, t) <= thresh) {
+      stopUnit(u);
+      u.facing = angleTo(u, t);
+      u.repairing = true;
+      t.hp = Math.min(t.maxHp, t.hp + u.repair.rate * dt);
+    } else {
+      const spot = besideTile(u, t);
+      issueMove(u, spot.x, spot.y);
+      u.commandedMove = true;
+    }
+  }
+  for (const [tw, u] of toGarrison) garrisonUnit(tw, u); // remove from state.units safely
+}
+
+/* ----------------------------- PATHFINDING ----------------------------- */
+// A size×size footprint at (x,y) is walkable if in bounds and building-free.
+// passGates=true lets a unit walk through gate tiles (friendly units only).
+function walkable(x, y, size, passGates) {
+  if (x < 0 || y < 0 || x + size > CONFIG.MAP_W || y + size > CONFIG.MAP_H) return false;
+  if (state.blocked.size === 0) return true; // fast path: no buildings yet
+  for (let dy = 0; dy < size; dy++)
+    for (let dx = 0; dx < size; dx++) {
+      const k = tileKey(x + dx, y + dy);
+      if (state.blocked.has(k) && !(passGates && state.gateTiles.has(k))) return false;
+    }
+  return true;
+}
+
+// Nearest walkable anchor to (gx,gy) for a given footprint, or null.
+function nearestWalkable(gx, gy, size, passGates) {
+  if (walkable(gx, gy, size, passGates)) return { x: gx, y: gy };
+  for (let r = 1; r < 14; r++) {
+    for (let dy = -r; dy <= r; dy++)
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        if (walkable(gx + dx, gy + dy, size, passGates)) return { x: gx + dx, y: gy + dy };
+      }
+  }
+  return null;
+}
+
+// Octile heuristic.
+function heur(x, y, gx, gy) {
+  const dx = Math.abs(x - gx), dy = Math.abs(y - gy);
+  return (dx + dy) - 0.5858 * Math.min(dx, dy);
+}
+
+// Tiny binary min-heap for the A* open set.
+class MinHeap {
+  constructor() { this.a = []; }
+  size() { return this.a.length; }
+  push(item, pri) {
+    const a = this.a; a.push({ item, pri }); let i = a.length - 1;
+    while (i > 0) { const p = (i - 1) >> 1; if (a[p].pri <= a[i].pri) break; [a[p], a[i]] = [a[i], a[p]]; i = p; }
+  }
+  pop() {
+    const a = this.a, top = a[0], last = a.pop();
+    if (a.length) {
+      a[0] = last; let i = 0; const n = a.length;
+      for (;;) {
+        let l = 2 * i + 1, r = 2 * i + 2, s = i;
+        if (l < n && a[l].pri < a[s].pri) s = l;
+        if (r < n && a[r].pri < a[s].pri) s = r;
+        if (s === i) break; [a[s], a[i]] = [a[i], a[s]]; i = s;
+      }
+    }
+    return top.item;
+  }
+}
+
+const PF_DIRS = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+
+// A* from the unit's current tile to (gx,gy). Returns [{x,y}...] waypoints
+// (excluding the start, including the goal), or [] if unreachable.
+function findPath(u, gx, gy) {
+  const size = u.size;
+  const pass = u.team === "player"; // your units may walk through your gates
+  const start = { x: Math.round(u.tx), y: Math.round(u.ty) };
+  let goal = walkable(gx, gy, size, pass) ? { x: gx, y: gy } : nearestWalkable(gx, gy, size, pass);
+  if (!goal) return [];
+  if (start.x === goal.x && start.y === goal.y) return [];
+
+  const W = CONFIG.MAP_W;
+  const startI = start.y * W + start.x, goalI = goal.y * W + goal.x;
+  const open = new MinHeap();
+  const g = new Map(); const came = new Map();
+  g.set(startI, 0);
+  open.push(startI, heur(start.x, start.y, goal.x, goal.y));
+
+  let expanded = 0;
+  const MAX = 8000; // safety cap
+  while (open.size() && expanded < MAX) {
+    const cur = open.pop();
+    if (cur === goalI) {
+      const path = [];
+      let c = cur;
+      while (c !== startI) { const x = c % W, y = (c - x) / W; path.push({ x, y }); c = came.get(c); }
+      path.reverse();
+      return path;
+    }
+    expanded++;
+    const cx = cur % W, cy = (cur - cx) / W;
+    const cg = g.get(cur);
+    for (const [dx, dy] of PF_DIRS) {
+      const nx = cx + dx, ny = cy + dy;
+      if (!walkable(nx, ny, size, pass)) continue;
+      if (dx && dy && (!walkable(cx + dx, cy, size, pass) || !walkable(cx, cy + dy, size, pass))) continue; // no corner cut
+      const ni = ny * W + nx;
+      const ng = cg + (dx && dy ? 1.4142 : 1);
+      if (!g.has(ni) || ng < g.get(ni)) {
+        g.set(ni, ng); came.set(ni, cur);
+        open.push(ni, ng + heur(nx, ny, goal.x, goal.y));
+      }
+    }
+  }
+  return []; // no route
+}
+
+/* ------------------------- LINE OF SIGHT ------------------------------- */
+// Does a straight line (tile space) cross any building tile not in `ignore`?
+function lineBlocked(x0, y0, x1, y1, ignore) {
+  const dx = x1 - x0, dy = y1 - y0;
+  const dist = Math.hypot(dx, dy);
+  const steps = Math.ceil(dist * 2);
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    const key = tileKey(Math.floor(x0 + dx * t), Math.floor(y0 + dy * t));
+    if (state.blocked.has(key) && !ignore.has(key)) return true;
+  }
+  return false;
+}
+
+// Can `u` see/shoot `t` — i.e. no wall or house sits between them? The shooter's
+// and target's own footprints never block.
+function hasLineOfSight(u, t) {
+  if (state.blocked.size === 0) return true;
+  const ignore = new Set();
+  markFootprint(Math.round(u.tx), Math.round(u.ty), u.size, ignore);
+  markFootprint(Math.round(t.tx), Math.round(t.ty), t.size, ignore);
+  const uc = (u.size - 1) / 2, tc = (t.size - 1) / 2;
+  return !lineBlocked(u.tx + uc, u.ty + uc, t.tx + tc, t.ty + tc, ignore);
+}
+
+/* ------------------------------ GARRISON ------------------------------- */
+// Which units may enter a Guard Tower: armed infantry that aren't healers.
+function canGarrison(u) {
+  return u.size === 1 && !u.repair && u.weapon && u.weapon.range > 0;
+}
+
+// Move a unit into a tower (removed from the field, fires from the tower).
+function garrisonUnit(tower, u) {
+  if (tower.garrison.length >= tower.cap) return false;
+  u.selected = false; u.forcedTarget = null; u.repairTarget = null; u.enterTarget = null;
+  u.path = []; u.commandedMove = false; u.retaliateTimer = 0;
+  const c = (tower.size - 1) / 2;
+  u.tx = tower.tx + c; u.ty = tower.ty + c; // fire from the tower's center
+  u.targetTx = u.tx; u.targetTy = u.ty; u.goalTx = u.tx; u.goalTy = u.ty;
+  state.units = state.units.filter(x => x !== u);
+  tower.garrison.push(u);
+  return true;
+}
+
+// Spill a tower's garrison back onto the map (on destruction or sale).
+function ejectGarrison(tower) {
+  if (!tower.garrison) return;
+  for (const g of tower.garrison) {
+    const spot = freeTileAround(tower) || { x: tower.tx, y: tower.ty };
+    g.tx = spot.x; g.ty = spot.y;
+    g.targetTx = spot.x; g.targetTy = spot.y;
+    g.goalTx = spot.x; g.goalTy = spot.y; g.path = [];
+    g.enterTarget = null; g.commandedMove = false; // don't march back in
+    state.units.push(g);
+  }
+  tower.garrison = [];
+}
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+/* ----------------------------- CAMERA ---------------------------------- */
+// Camera position = world-space pixel at the top-left of the screen.
+const camera = { x: 0, y: 0 };
+
+function centerCameraOn(tx, ty) {
+  const w = tileToWorld(tx, ty);
+  camera.x = w.x - canvas.width / 2;
+  camera.y = w.y - canvas.height / 2;
+}
+
+function clampCamera() {
+  // Keep camera within the diamond-shaped world bounds (with slack).
+  const corners = [
+    tileToWorld(0, 0),
+    tileToWorld(CONFIG.MAP_W - 1, 0),
+    tileToWorld(0, CONFIG.MAP_H - 1),
+    tileToWorld(CONFIG.MAP_W - 1, CONFIG.MAP_H - 1),
+  ];
+  const minX = Math.min(...corners.map(c => c.x)) - CONFIG.TILE_W;
+  const maxX = Math.max(...corners.map(c => c.x)) + CONFIG.TILE_W;
+  const minY = Math.min(...corners.map(c => c.y)) - CONFIG.TILE_H;
+  const maxY = Math.max(...corners.map(c => c.y)) + CONFIG.TILE_H;
+  camera.x = clamp(camera.x, minX, maxX - canvas.width);
+  camera.y = clamp(camera.y, minY, maxY - canvas.height);
+}
+
+/* Screen <-> world with camera applied. */
+function screenToWorld(sx, sy) { return { x: sx + camera.x, y: sy + camera.y }; }
+function worldToScreen(wx, wy) { return { x: wx - camera.x, y: wy - camera.y }; }
+
+// Screen position of a unit's visual center (footprint-aware).
+function unitScreen(u) {
+  const c = (u.size - 1) / 2;
+  const w = tileToWorld(u.tx + c, u.ty + c);
+  return worldToScreen(w.x, w.y);
+}
+
+// Is a screen point over a unit's drawn body? Accounts for the raised body
+// (tanks/soldiers are drawn above their ground tile), so clicks land reliably.
+function unitHit(u, sx, sy) {
+  const s = unitScreen(u);
+  const R = u.radius;
+  return sx >= s.x - R * 1.4 && sx <= s.x + R * 1.4 &&
+         sy >= s.y - R * 2.7 && sy <= s.y + R * 0.8;
+}
+
+// Front-most unit under a screen point (any team), or null.
+function unitAt(sx, sy) {
+  let picked = null, bestDepth = -Infinity;
+  for (const u of state.units) {
+    if (unitHit(u, sx, sy)) {
+      const depth = u.tx + u.ty;            // larger = nearer the camera
+      if (depth >= bestDepth) { bestDepth = depth; picked = u; }
+    }
+  }
+  return picked;
+}
+
+// Front-most hostile (non-player) unit under a screen point, or null.
+function enemyAt(sx, sy) {
+  const u = unitAt(sx, sy);
+  return u && u.team !== "player" ? u : null;
+}
+
+// Front-most friendly unit under a screen point, or null.
+function friendlyUnitAt(sx, sy) {
+  const u = unitAt(sx, sy);
+  return u && u.team === "player" ? u : null;
+}
+
+/* ----------------------------- INPUT ----------------------------------- */
+const input = {
+  mouse: { x: 0, y: 0 },
+  keys: new Set(),
+  dragging: false,               // left-button box select
+  dragStart: { x: 0, y: 0 },     // screen space
+  dragEnd: { x: 0, y: 0 },
+  panning: false,                // right-button map drag
+  panStart: { x: 0, y: 0, camX: 0, camY: 0 },
+};
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const statusEl = document.getElementById("status");
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize", resize);
+
+canvas.addEventListener("contextmenu", e => e.preventDefault());
+
+canvas.addEventListener("mousemove", e => {
+  input.mouse.x = e.clientX;
+  input.mouse.y = e.clientY;
+  if (input.dragging) { input.dragEnd.x = e.clientX; input.dragEnd.y = e.clientY; }
+});
+
+// Order the current selection to attack an enemy under (cx,cy), else move
+// there. Returns false if nothing is selected. Left-click uses this.
+function commandSelected(cx, cy) {
+  const selected = state.units.filter(u => u.selected);
+  if (!selected.length) return false;
+  for (const u of selected) { u.repairTarget = null; u.enterTarget = null; } // cancel repair/garrison
+
+  const enemy = enemyAt(cx, cy);
+  if (enemy) {
+    // Form a shoulder-to-shoulder arc on the side the group is approaching
+    // from — never wrapping around to the far side of the enemy.
+    const ec = (enemy.size - 1) / 2;
+    let gx = 0, gy = 0;
+    for (const u of selected) { const c = (u.size - 1) / 2; gx += u.tx + c; gy += u.ty + c; }
+    gx /= selected.length; gy /= selected.length;
+    const base = Math.atan2(gy - (enemy.ty + ec), gx - (enemy.tx + ec));
+
+    const n = selected.length;
+    const maxArc = Math.PI * 0.9;                  // cap so slots stay near side
+    const step = n > 1 ? Math.min(0.38, maxArc / (n - 1)) : 0; // ~22° apart
+    const start = base - step * (n - 1) / 2;       // centered on the approach
+
+    // Assign slots left-to-right across the arc so units don't cross over.
+    const perpx = -Math.sin(base), perpy = Math.cos(base);
+    const ordered = selected.slice().sort((a, b) => {
+      const ax = a.tx + (a.size - 1) / 2, ay = a.ty + (a.size - 1) / 2;
+      const bx = b.tx + (b.size - 1) / 2, by = b.ty + (b.size - 1) / 2;
+      return ((ax - gx) * perpx + (ay - gy) * perpy)
+           - ((bx - gx) * perpx + (by - gy) * perpy);
+    });
+    ordered.forEach((u, i) => {
+      u.forcedTarget = enemy;
+      u.attackAngle = start + i * step;
+    });
+  } else {
+    for (const u of selected) u.forcedTarget = null;  // plain move cancels attack
+    const w = screenToWorld(cx, cy);
+    const t = worldToTile(w.x, w.y);
+    assignGroupMove(
+      selected,
+      clamp(Math.round(t.tx), 0, CONFIG.MAP_W - 1),
+      clamp(Math.round(t.ty), 0, CONFIG.MAP_H - 1),
+    );
+  }
+  return true;
+}
+
+canvas.addEventListener("mousedown", e => {
+  // Building placement mode intercepts clicks.
+  if (state.placing) {
+    if (e.button === 0) tryPlaceAtCursor(e.clientX, e.clientY);
+    else if (e.button === 2) state.placing = null; // right-click cancels
+    return;
+  }
+
+  if (e.button === 0) {
+    // Left button: begin a potential select / box-select. The actual action is
+    // decided on mouseup (click vs drag).
+    input.dragging = true;
+    input.dragStart.x = e.clientX; input.dragStart.y = e.clientY;
+    input.dragEnd.x = e.clientX;   input.dragEnd.y = e.clientY;
+  } else if (e.button === 2) {
+    // Right-drag from a selected producer (Barracks/Garage) sets its rally point.
+    const sb = state.selectedBuilding;
+    if (sb && BUILDING_TYPES[sb.type].produces && buildingAt(e.clientX, e.clientY) === sb) {
+      state.settingRally = sb;
+      return;
+    }
+    // Otherwise: begin dragging the map.
+    input.panning = true;
+    input.panStart.x = e.clientX;
+    input.panStart.y = e.clientY;
+    input.panStart.camX = camera.x;
+    input.panStart.camY = camera.y;
+  }
+});
+
+canvas.addEventListener("mouseup", e => {
+  if (e.button === 2) {
+    if (state.settingRally) { // finish setting a Barracks rally point
+      const b = state.settingRally;
+      state.settingRally = null;
+      const w = screenToWorld(e.clientX, e.clientY);
+      const t = worldToTile(w.x, w.y);
+      b.rally = { x: clamp(Math.round(t.tx), 0, CONFIG.MAP_W - 1),
+                  y: clamp(Math.round(t.ty), 0, CONFIG.MAP_H - 1) };
+      return;
+    }
+    const wasPanning = input.panning;
+    input.panning = false;
+    if (!wasPanning) return; // press was consumed elsewhere (e.g. placement cancel)
+    // A right-click that didn't drag the map = deselect everything.
+    const moved = Math.hypot(e.clientX - input.panStart.x, e.clientY - input.panStart.y);
+    if (moved < 5) {
+      for (const u of state.units) u.selected = false;
+      state.selectedBuilding = null;
+    }
+    return;
+  }
+  if (e.button !== 0 || !input.dragging) return;
+  input.dragging = false;
+
+  const dxScreen = Math.abs(input.dragEnd.x - input.dragStart.x);
+  const dyScreen = Math.abs(input.dragEnd.y - input.dragStart.y);
+  const isBox = dxScreen > 5 || dyScreen > 5;
+
+  if (isBox) {
+    // Box select: any player unit whose screen position falls in the rectangle.
+    const x1 = Math.min(input.dragStart.x, input.dragEnd.x);
+    const x2 = Math.max(input.dragStart.x, input.dragEnd.x);
+    const y1 = Math.min(input.dragStart.y, input.dragEnd.y);
+    const y2 = Math.max(input.dragStart.y, input.dragEnd.y);
+    state.selectedBuilding = null;
+    for (const u of state.units) {
+      if (u.team !== "player") continue; // enemies aren't selectable
+      const s = unitScreen(u);
+      u.selected = s.x >= x1 && s.x <= x2 && s.y >= y1 && s.y <= y2;
+    }
+    return;
+  }
+
+  // Repair/heal order: selected healers clicked on a valid friendly target.
+  const healers = state.units.filter(u => u.selected && u.repair);
+  if (healers.length) {
+    const tgt = friendlyUnitAt(e.clientX, e.clientY) || buildingAt(e.clientX, e.clientY);
+    if (tgt) {
+      let any = false;
+      for (const h of healers) if (canRepair(h, tgt)) { h.repairTarget = tgt; h.forcedTarget = null; any = true; }
+      if (any) return;
+    }
+  }
+
+  // Garrison order: selected infantry clicked on a friendly Guard Tower —
+  // they walk over and enter when they reach it (see updateSupport).
+  const clickedB = buildingAt(e.clientX, e.clientY);
+  if (clickedB && clickedB.tower && clickedB.built && clickedB.team === "player") {
+    const troops = state.units.filter(u => u.selected && canGarrison(u));
+    if (troops.length) {
+      for (const u of troops) {
+        u.enterTarget = clickedB; u.repairTarget = null; u.forcedTarget = null;
+      }
+      return;
+    }
+  }
+
+  // Single left-click. Clicking a player unit selects it (front-most wins)...
+  let picked = null, bestDepth = -Infinity;
+  for (const u of state.units) {
+    if (u.team !== "player") continue;
+    if (unitHit(u, e.clientX, e.clientY)) {
+      const depth = u.tx + u.ty;
+      if (depth >= bestDepth) { bestDepth = depth; picked = u; }
+    }
+  }
+  if (picked) {
+    state.selectedBuilding = null;
+    for (const u of state.units) u.selected = (u === picked);
+    return;
+  }
+
+  // ...else a friendly building selects it (shows the Sell option)...
+  const b = buildingAt(e.clientX, e.clientY);
+  if (b && b.team === "player") {
+    for (const u of state.units) u.selected = false;
+    state.selectedBuilding = b;
+    return;
+  }
+
+  // ...otherwise, command the selection (move/attack), or clear if none.
+  state.selectedBuilding = null;
+  if (!commandSelected(e.clientX, e.clientY)) {
+    for (const u of state.units) u.selected = false;
+  }
+});
+
+// If the cursor leaves the canvas, stop any in-progress map drag.
+canvas.addEventListener("mouseleave", () => { input.panning = false; });
+
+const controlGroups = {}; // "0".."9" -> array of unit refs
+
+window.addEventListener("keydown", e => {
+  input.keys.add(e.key.toLowerCase());
+  if (e.key === "Escape") { state.placing = null; state.selectedBuilding = null; return; }
+
+  // Space rotates a rotatable building (the gate) while placing.
+  if (e.key === " " && state.placing && BUILDING_TYPES[state.placing.type].gate) {
+    e.preventDefault();
+    state.placing.rot = ((state.placing.rot || 0) + 1) % 2;
+    return;
+  }
+
+  // Ctrl+H: snap the camera back to the Main House.
+  if (e.ctrlKey && e.key.toLowerCase() === "h") {
+    e.preventDefault();
+    const main = state.buildings.find(b => b.type === "main");
+    if (main) centerCameraOn(main.tx + (main.size - 1) / 2, main.ty + (main.size - 1) / 2);
+    return;
+  }
+
+  // Ctrl+0..9 assigns the selection to a control group; 0..9 alone reselects it.
+  if (/^[0-9]$/.test(e.key)) {
+    if (e.ctrlKey) {
+      e.preventDefault();
+      controlGroups[e.key] = state.units.filter(u => u.selected);
+    } else {
+      const g = (controlGroups[e.key] || []).filter(u => u.hp > 0 && state.units.includes(u));
+      controlGroups[e.key] = g;
+      state.selectedBuilding = null;
+      for (const u of state.units) u.selected = false;
+      for (const u of g) u.selected = true;
+    }
+  }
+});
+window.addEventListener("keyup", e => input.keys.delete(e.key.toLowerCase()));
+
+// Keyboard + edge-of-screen panning.
+function updateCamera(dt) {
+  let dx = 0, dy = 0;
+  const k = input.keys;
+  if (k.has("a") || k.has("arrowleft"))  dx -= 1;
+  if (k.has("d") || k.has("arrowright")) dx += 1;
+  if (k.has("w") || k.has("arrowup"))    dy -= 1;
+  if (k.has("s") || k.has("arrowdown"))  dy += 1;
+
+  // Edge-scroll (skipped while dragging the map with the right button).
+  const m = input.mouse;
+  if (!input.panning) {
+    if (m.x < CONFIG.EDGE_PAN) dx -= 1;
+    if (m.x > canvas.width - CONFIG.EDGE_PAN) dx += 1;
+    if (m.y < CONFIG.EDGE_PAN) dy -= 1;
+    if (m.y > canvas.height - CONFIG.EDGE_PAN) dy += 1;
+  }
+
+  if (dx || dy) {
+    const len = Math.hypot(dx, dy) || 1;
+    camera.x += (dx / len) * CONFIG.PAN_SPEED * dt;
+    camera.y += (dy / len) * CONFIG.PAN_SPEED * dt;
+  }
+
+  // Right-button velocity pan: how far the cursor is from where you pressed
+  // sets the slide speed (past a small deadzone). Hold still = keep sliding.
+  if (input.panning) {
+    const dead = 8;
+    let ox = input.mouse.x - input.panStart.x;
+    let oy = input.mouse.y - input.panStart.y;
+    ox = Math.abs(ox) < dead ? 0 : ox - Math.sign(ox) * dead;
+    oy = Math.abs(oy) < dead ? 0 : oy - Math.sign(oy) * dead;
+    camera.x += ox * CONFIG.DRAG_PAN_SPEED * dt;
+    camera.y += oy * CONFIG.DRAG_PAN_SPEED * dt;
+  }
+
+  clampCamera();
+}
+
+/* ----------------------------- RENDER ---------------------------------- */
+// Deterministic 0..1 pseudo-random from grid coords (stable per tile).
+function rand2(x, y, seed) {
+  const n = Math.sin(x * 127.1 + y * 311.7 + seed * 74.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+// Shift a #rrggbb hex toward white (amt>0) or black (amt<0). Returns rgb().
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const target = amt < 0 ? 0 : 255, t = Math.abs(amt);
+  r = Math.round(r + (target - r) * t);
+  g = Math.round(g + (target - g) * t);
+  b = Math.round(b + (target - b) * t);
+  return `rgb(${r},${g},${b})`;
+}
+
+function diamondPath(c, sx, sy, hw, hh) {
+  c.beginPath();
+  c.moveTo(sx, sy - hh);
+  c.lineTo(sx + hw, sy);
+  c.lineTo(sx, sy + hh);
+  c.lineTo(sx - hw, sy);
+  c.closePath();
+}
+
+// Highlight a single map tile (used for cursor + unit-footprint hovering).
+function drawTileHighlight(gx, gy, fill, stroke) {
+  if (gx < 0 || gy < 0 || gx >= CONFIG.MAP_W || gy >= CONFIG.MAP_H) return;
+  const w = tileToWorld(gx, gy);
+  const s = worldToScreen(w.x, w.y);
+  diamondPath(ctx, s.x, s.y, HALF_W, HALF_H);
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.lineWidth = 1;
+}
+
+const GRASS = ["#3f6b3a", "#457a3e", "#39602f", "#4c7d42", "#436e37"];
+
+// One terrain tile with baked-in detail (drawn once into the map cache).
+function drawTile(c, sx, sy, terrain, gx, gy) {
+  const r0 = rand2(gx, gy, 1);
+
+  // Base fill
+  const base = terrain === 1
+    ? shade("#6f5c3e", (r0 - 0.5) * 0.22)       // dirt
+    : GRASS[(r0 * GRASS.length) | 0];           // grass
+  diamondPath(c, sx, sy, HALF_W, HALF_H);
+  c.fillStyle = base;
+  c.fill();
+
+  // Soft edge: light top-left, faint dark seam so the grid reads subtly.
+  c.strokeStyle = "rgba(0,0,0,0.10)";
+  c.lineWidth = 1;
+  c.stroke();
+
+  // Scattered decoration
+  const d = rand2(gx, gy, 7);
+  const jx = (rand2(gx, gy, 3) - 0.5) * HALF_W;
+  const jy = (rand2(gx, gy, 5) - 0.5) * HALF_H;
+
+  if (terrain === 1) {
+    // Dirt: a couple of pebbles
+    if (d > 0.55) {
+      for (let i = 0; i < 3; i++) {
+        const px = sx + jx + (rand2(gx + i, gy, 9) - 0.5) * 20;
+        const py = sy + jy + (rand2(gx, gy + i, 9) - 0.5) * 10;
+        c.beginPath();
+        c.ellipse(px, py, 2.2, 1.4, 0, 0, Math.PI * 2);
+        c.fillStyle = shade("#6f5c3e", -0.25);
+        c.fill();
+      }
+    }
+  } else if (d > 0.9) {
+    // Rock
+    c.beginPath();
+    c.ellipse(sx + jx, sy + jy, 4.5, 3, 0, 0, Math.PI * 2);
+    c.fillStyle = "#7a7d85"; c.fill();
+    c.beginPath();
+    c.ellipse(sx + jx - 1, sy + jy - 1, 2, 1.3, 0, 0, Math.PI * 2);
+    c.fillStyle = "#9aa0aa"; c.fill();
+  } else if (d > 0.78) {
+    // Tiny flower
+    c.fillStyle = ["#f9e2af", "#f38ba8", "#cba6f7"][(rand2(gx, gy, 11) * 3) | 0];
+    c.beginPath();
+    c.arc(sx + jx, sy + jy - 2, 1.8, 0, Math.PI * 2);
+    c.fill();
+    c.strokeStyle = shade(base, -0.15);
+    c.beginPath(); c.moveTo(sx + jx, sy + jy); c.lineTo(sx + jx, sy + jy - 2); c.stroke();
+  } else if (d > 0.5) {
+    // Grass tufts
+    c.strokeStyle = shade(base, 0.18);
+    c.lineWidth = 1;
+    for (let i = -1; i <= 1; i++) {
+      c.beginPath();
+      c.moveTo(sx + jx + i * 2.5, sy + jy + 1);
+      c.lineTo(sx + jx + i * 2.5 + i, sy + jy - 3);
+      c.stroke();
+    }
+  }
+}
+
+/* -------------------- TERRAIN CACHE (offscreen) ------------------------
+ * The map is static, so render every tile ONCE into an offscreen canvas.
+ * Each frame we blit just the visible slice with a single drawImage call
+ * instead of re-stroking thousands of diamonds. This is the main perf win.
+ * --------------------------------------------------------------------- */
+let mapCanvas = null;
+let mapOffX = 0, mapOffY = 0; // world-space -> offscreen-canvas pixel offset
+
+function computeWorldBounds() {
+  const corners = [
+    tileToWorld(0, 0),
+    tileToWorld(CONFIG.MAP_W - 1, 0),
+    tileToWorld(0, CONFIG.MAP_H - 1),
+    tileToWorld(CONFIG.MAP_W - 1, CONFIG.MAP_H - 1),
+  ];
+  return {
+    minX: Math.min(...corners.map(c => c.x)) - CONFIG.TILE_W,
+    maxX: Math.max(...corners.map(c => c.x)) + CONFIG.TILE_W,
+    minY: Math.min(...corners.map(c => c.y)) - CONFIG.TILE_H,
+    maxY: Math.max(...corners.map(c => c.y)) + CONFIG.TILE_H,
+  };
+}
+
+function prerenderMap() {
+  const b = computeWorldBounds();
+  mapOffX = -b.minX;
+  mapOffY = -b.minY;
+  mapCanvas = document.createElement("canvas");
+  mapCanvas.width = Math.ceil(b.maxX - b.minX);
+  mapCanvas.height = Math.ceil(b.maxY - b.minY);
+  const mctx = mapCanvas.getContext("2d");
+  for (let y = 0; y < CONFIG.MAP_H; y++) {
+    for (let x = 0; x < CONFIG.MAP_W; x++) {
+      const w = tileToWorld(x, y);
+      drawTile(mctx, w.x + mapOffX, w.y + mapOffY, state.map[y][x], x, y);
+    }
+  }
+}
+
+// Blit the visible region of the cached map, clamped to the buffer bounds.
+function blitMap() {
+  let sx = camera.x + mapOffX;
+  let sy = camera.y + mapOffY;
+  let sw = canvas.width, sh = canvas.height;
+  let dx = 0, dy = 0;
+  if (sx < 0) { dx = -sx; sw += sx; sx = 0; }
+  if (sy < 0) { dy = -sy; sh += sy; sy = 0; }
+  if (sx + sw > mapCanvas.width)  sw = mapCanvas.width - sx;
+  if (sy + sh > mapCanvas.height) sh = mapCanvas.height - sy;
+  if (sw > 0 && sh > 0) {
+    ctx.drawImage(mapCanvas, sx, sy, sw, sh, dx, dy, sw, sh);
+  }
+}
+
+// An isometric box: top diamond face + left/right side faces of height h.
+function drawIsoCube(c, cx, cyTop, hw, hh, h, topCol, leftCol, rightCol) {
+  const Tx = cx, Ty = cyTop - hh;
+  const Rx = cx + hw, Ry = cyTop;
+  const Bx = cx, By = cyTop + hh;
+  const Lx = cx - hw, Ly = cyTop;
+
+  // Right side
+  c.beginPath();
+  c.moveTo(Rx, Ry); c.lineTo(Bx, By); c.lineTo(Bx, By + h); c.lineTo(Rx, Ry + h); c.closePath();
+  c.fillStyle = rightCol; c.fill();
+  // Left side
+  c.beginPath();
+  c.moveTo(Lx, Ly); c.lineTo(Bx, By); c.lineTo(Bx, By + h); c.lineTo(Lx, Ly + h); c.closePath();
+  c.fillStyle = leftCol; c.fill();
+  // Top
+  c.beginPath();
+  c.moveTo(Tx, Ty); c.lineTo(Rx, Ry); c.lineTo(Bx, By); c.lineTo(Lx, Ly); c.closePath();
+  c.fillStyle = topCol; c.fill();
+  c.strokeStyle = "rgba(0,0,0,0.35)"; c.lineWidth = 1; c.stroke();
+}
+
+// A tank: 3D hull + turret + a barrel that points where it's heading.
+function drawVehicleBody(s, R, col, facing) {
+  const height = R * 0.7;
+  const topY = s.y - height;
+  drawIsoCube(ctx, s.x, topY, R * 1.2, R * 0.6, height,
+    shade(col, 0.05), shade(col, -0.38), shade(col, -0.22));
+
+  const tR = R * 0.62;
+  ctx.beginPath();
+  ctx.arc(s.x, topY, tR, 0, Math.PI * 2);
+  ctx.fillStyle = shade(col, 0.2);
+  ctx.fill();
+  ctx.strokeStyle = shade(col, -0.45);
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  const bl = R * 1.5;
+  ctx.strokeStyle = shade(col, -0.3);
+  ctx.lineWidth = 3.5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(s.x, topY);
+  ctx.lineTo(s.x + Math.cos(facing) * bl, topY + Math.sin(facing) * bl * 0.6);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+  ctx.lineCap = "butt";
+}
+
+// A little figure: torso + head, team-colored.
+function drawPersonBody(s, R, col) {
+  ctx.beginPath();
+  ctx.ellipse(s.x, s.y - R * 0.75, R * 0.55, R * 0.95, 0, 0, Math.PI * 2);
+  ctx.fillStyle = col;
+  ctx.fill();
+  ctx.strokeStyle = shade(col, -0.45);
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Highlight for a bit of volume
+  ctx.beginPath();
+  ctx.ellipse(s.x - R * 0.15, s.y - R * 0.95, R * 0.18, R * 0.4, 0, 0, Math.PI * 2);
+  ctx.fillStyle = shade(col, 0.28);
+  ctx.fill();
+
+  // Head
+  ctx.beginPath();
+  ctx.arc(s.x, s.y - R * 1.8, R * 0.5, 0, Math.PI * 2);
+  ctx.fillStyle = shade(col, 0.15);
+  ctx.fill();
+  ctx.strokeStyle = shade(col, -0.45);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+}
+
+function drawUnit(u) {
+  const s = unitScreen(u);
+  const R = u.radius;
+  const col = u.color;
+
+  // Ground shadow
+  ctx.beginPath();
+  ctx.ellipse(s.x, s.y + 3, R * 1.15, R * 0.55, 0, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(0,0,0,0.30)";
+  ctx.fill();
+
+  // Selection: green targeting ring on the ground (drawn under the unit).
+  if (u.selected) {
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = "#a6e3a1";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(s.x, s.y + 3, R * 1.55, R * 0.78, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1;
+  }
+
+  // Hover: white ring normally, red when it's an enemy you could attack.
+  if (u === hoveredUnit) {
+    const attackable = u.team === "enemy" && state.units.some(x => x.selected);
+    ctx.strokeStyle = attackable ? "rgba(243,139,168,0.95)" : "rgba(255,255,255,0.9)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(s.x, s.y + 3, R * 1.55, R * 0.78, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+
+  // Promotion pulse: an expanding, fading gold ring when just leveled up.
+  if (u.levelFlash > 0) {
+    const p = 1 - u.levelFlash / 0.6; // 0 -> 1 over the flash
+    ctx.strokeStyle = `rgba(249,226,175,${1 - p})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.ellipse(s.x, s.y + 3, R * (1.4 + p * 1.4), R * (0.7 + p * 0.7), 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+
+  if (u.type === "vehicle") drawVehicleBody(s, R, col, u.facing);
+  else drawPersonBody(s, R, col);
+
+  // Muzzle flash at the gun's tip while firing.
+  if (u.muzzle > 0) {
+    const gunLen = u.type === "vehicle" ? R * 1.5 : R * 0.9;
+    const fx = s.x + Math.cos(u.facing) * gunLen;
+    const fy = (s.y - R * 0.7) + Math.sin(u.facing) * gunLen * 0.6;
+    ctx.beginPath();
+    ctx.arc(fx, fy, R * 0.32, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffe08a";
+    ctx.fill();
+  }
+
+  // Health bar (only when selected or damaged)
+  const barY = s.y - R * 2.5;
+  if (u.selected || u.hp < u.maxHp) {
+    const bw = R * 2.2, bh = 4;
+    const bx = s.x - bw / 2, by = barY;
+    const frac = Math.max(0, u.hp / u.maxHp);
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(bx - 1, by - 1, bw + 2, bh + 2);
+    ctx.fillStyle = frac > 0.5 ? "#a6e3a1" : frac > 0.25 ? "#f9e2af" : "#f38ba8";
+    ctx.fillRect(bx, by, bw * frac, bh);
+  }
+
+  // Rank pips: one gold chevron per level, just above the health bar.
+  for (let i = 0; i < u.level; i++) {
+    const px = s.x - (u.level - 1) * 3 + i * 6;
+    const py = barY - 6;
+    ctx.beginPath();
+    ctx.moveTo(px - 2.5, py + 2);
+    ctx.lineTo(px, py - 2);
+    ctx.lineTo(px + 2.5, py + 2);
+    ctx.strokeStyle = "#f9e2af";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+}
+
+// Screen point of a tile grid vertex.
+function gridPt(tx, ty) { const w = tileToWorld(tx, ty); return worldToScreen(w.x, w.y); }
+
+// Draw a building as a chunky iso block over its (possibly non-square) footprint.
+function drawBuilding(b, ghost) {
+  const W = b.bw, H = b.bh;
+  const s = gridPt(b.tx + (W - 1) / 2, b.ty + (H - 1) / 2); // footprint center
+  const height = b.tower ? 60 : (12 + Math.max(W, H) * 9); // tower stands ~3 tiles tall
+  const constructing = !ghost && !b.built;
+  const unpowered = !ghost && b.built && b.needsPower && isLowPower();
+  let col = b.color;
+  if (unpowered) col = shade(col, -0.35);
+
+  // Footprint corners = the grid vertices around the covered tiles (tile
+  // centers are at integer coords, so the corners are at the −0.5 edges).
+  const A = gridPt(b.tx - 0.5, b.ty - 0.5), B = gridPt(b.tx + W - 0.5, b.ty - 0.5);
+  const C = gridPt(b.tx + W - 0.5, b.ty + H - 0.5), D = gridPt(b.tx - 0.5, b.ty + H - 0.5);
+
+  // Selection ring on the ground (footprint outline).
+  if (!ghost && state.selectedBuilding === b) {
+    ctx.beginPath();
+    ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.lineTo(C.x, C.y); ctx.lineTo(D.x, D.y); ctx.closePath();
+    ctx.strokeStyle = "#a6e3a1"; ctx.lineWidth = 2.5; ctx.stroke(); ctx.lineWidth = 1;
+  }
+
+  ctx.globalAlpha = ghost ? 0.5 : (constructing ? 0.5 : 1);
+  const top = shade(col, 0.06), left = shade(col, -0.42), right = shade(col, -0.26);
+  // right face (B->C), then left/front face (D->C), then the top.
+  ctx.fillStyle = right;
+  ctx.beginPath();
+  ctx.moveTo(B.x, B.y - height); ctx.lineTo(C.x, C.y - height); ctx.lineTo(C.x, C.y); ctx.lineTo(B.x, B.y); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = left;
+  ctx.beginPath();
+  ctx.moveTo(D.x, D.y - height); ctx.lineTo(C.x, C.y - height); ctx.lineTo(C.x, C.y); ctx.lineTo(D.x, D.y); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = top;
+  ctx.beginPath();
+  ctx.moveTo(A.x, A.y - height); ctx.lineTo(B.x, B.y - height); ctx.lineTo(C.x, C.y - height); ctx.lineTo(D.x, D.y - height); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "rgba(0,0,0,0.35)"; ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  if (ghost) return;
+
+  const hw = Math.max(W, H) * HALF_W, hh = Math.max(W, H) * HALF_H;
+  const topBar = A.y - height - 12;
+  // Construction progress bar (cyan) while building.
+  if (constructing) {
+    const bw = hw * 1.4, bh = 6;
+    const bx = s.x - bw / 2;
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(bx - 1, topBar - 1, bw + 2, bh + 2);
+    ctx.fillStyle = "#89dceb";
+    ctx.fillRect(bx, topBar, bw * b.progress, bh);
+  } else if (b.hp < b.maxHp) {
+    // Health bar when damaged.
+    const bw = hw * 1.4, bh = 5;
+    const bx = s.x - bw / 2;
+    const frac = Math.max(0, b.hp / b.maxHp);
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(bx - 1, topBar - 1, bw + 2, bh + 2);
+    ctx.fillStyle = frac > 0.5 ? "#a6e3a1" : frac > 0.25 ? "#f9e2af" : "#f38ba8";
+    ctx.fillRect(bx, topBar, bw * frac, bh);
+  }
+  // Low-power marker.
+  if (unpowered) {
+    ctx.fillStyle = "#f9e2af";
+    ctx.font = "bold 14px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("⚡", s.x, topBar - 8);
+    ctx.textAlign = "left";
+  }
+  // Garrison count on a Guard Tower.
+  if (b.tower && b.built) {
+    ctx.fillStyle = "#11151e";
+    ctx.fillRect(s.x - 15, s.y - height - 6, 30, 15);
+    ctx.fillStyle = b.garrison.length ? "#a6e3a1" : "#6c7086";
+    ctx.font = "bold 11px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(`${b.garrison.length}/${b.cap}`, s.x, s.y - height + 5);
+    ctx.textAlign = "left";
+  }
+}
+
+// The front-most building whose drawn block is under a screen point, or null.
+function buildingAt(sx, sy) {
+  let hit = null, bestDepth = -Infinity;
+  for (const b of state.buildings) {
+    const W = b.bw, H = b.bh;
+    const A = gridPt(b.tx - 0.5, b.ty - 0.5), B = gridPt(b.tx + W - 0.5, b.ty - 0.5);
+    const C = gridPt(b.tx + W - 0.5, b.ty + H - 0.5), D = gridPt(b.tx - 0.5, b.ty + H - 0.5);
+    const height = b.tower ? 60 : (12 + Math.max(W, H) * 9);
+    const minX = Math.min(A.x, B.x, C.x, D.x), maxX = Math.max(A.x, B.x, C.x, D.x);
+    const minY = Math.min(A.y, B.y, C.y, D.y) - height, maxY = Math.max(A.y, B.y, C.y, D.y);
+    if (sx >= minX && sx <= maxX && sy >= minY && sy <= maxY) {
+      const depth = b.tx + b.ty + b.size;
+      if (depth > bestDepth) { bestDepth = depth; hit = b; }
+    }
+  }
+  return hit;
+}
+
+let hoveredUnit = null;
+
+function render() {
+  ctx.fillStyle = "#0b0e14";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Terrain: one blit of the pre-rendered map instead of thousands of tiles.
+  blitMap();
+
+  // Hover: highlight the unit under the cursor (its whole footprint), or the
+  // single ground tile when hovering empty terrain.
+  hoveredUnit = unitAt(input.mouse.x, input.mouse.y);
+  if (hoveredUnit) {
+    const attackable = hoveredUnit.team === "enemy" && state.units.some(x => x.selected);
+    const fill = attackable ? "rgba(243,139,168,0.15)" : "rgba(255,255,255,0.10)";
+    const stroke = attackable ? "rgba(243,139,168,0.8)" : "rgba(255,255,255,0.65)";
+    const ax = Math.round(hoveredUnit.tx), ay = Math.round(hoveredUnit.ty);
+    for (let dy = 0; dy < hoveredUnit.size; dy++)
+      for (let dx = 0; dx < hoveredUnit.size; dx++)
+        drawTileHighlight(ax + dx, ay + dy, fill, stroke);
+  } else {
+    const wm = screenToWorld(input.mouse.x, input.mouse.y);
+    const tm = worldToTile(wm.x, wm.y);
+    drawTileHighlight(Math.round(tm.tx), Math.round(tm.ty),
+      "rgba(255,255,255,0.08)", "rgba(255,255,255,0.5)");
+  }
+
+  // Buildings + units, depth-sorted together so overlaps look right.
+  const drawList = [...state.buildings, ...state.units];
+  drawList.sort((a, b) => (a.tx + a.ty + (a.size - 1)) - (b.tx + b.ty + (b.size - 1)));
+  for (const o of drawList) {
+    if (o.isBuilding) drawBuilding(o);
+    else drawUnit(o);
+  }
+
+  // Bullet tracers.
+  for (const e of state.effects) {
+    const a = worldToScreen(e.x1, e.y1);
+    const b = worldToScreen(e.x2, e.y2);
+    ctx.globalAlpha = Math.max(0, e.life / 0.08);
+    ctx.strokeStyle = e.hit ? "#fdf6b2" : "rgba(210,210,210,0.7)";
+    ctx.lineWidth = e.hit ? 2 : 1.5;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = 1;
+
+  // Healing links (engineer/first-aid actively repairing).
+  for (const u of state.units) {
+    if (!u.repairing || !u.repairTarget) continue;
+    const a = unitScreen(u);
+    const tw = tileToWorld(u.repairTarget.tx + (u.repairTarget.size - 1) / 2,
+                           u.repairTarget.ty + (u.repairTarget.size - 1) / 2);
+    const b = worldToScreen(tw.x, tw.y);
+    ctx.strokeStyle = "rgba(166,227,161,0.8)";
+    ctx.setLineDash([3, 3]);
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y - u.radius);
+    ctx.lineTo(b.x, b.y - 6);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1;
+    // green plus over the healer
+    ctx.strokeStyle = "#a6e3a1";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(a.x - 4, a.y - u.radius * 2.4); ctx.lineTo(a.x + 4, a.y - u.radius * 2.4);
+    ctx.moveTo(a.x, a.y - u.radius * 2.4 - 4); ctx.lineTo(a.x, a.y - u.radius * 2.4 + 4);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+
+  // Producer rally-point link (while dragging one, or when a producer is selected).
+  const rb = state.settingRally ||
+    (state.selectedBuilding && BUILDING_TYPES[state.selectedBuilding.type].produces
+      ? state.selectedBuilding : null);
+  if (rb) {
+    const bs = gridPt(rb.tx + rb.bw / 2, rb.ty + rb.bh / 2);
+    let tx = null, ty = null;
+    if (state.settingRally === rb) { tx = input.mouse.x; ty = input.mouse.y; }
+    else if (rb.rally) { const p = gridPt(rb.rally.x, rb.rally.y); tx = p.x; ty = p.y; }
+    if (tx !== null) {
+      ctx.strokeStyle = "rgba(137,220,235,0.85)";
+      ctx.setLineDash([6, 4]); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(bs.x, bs.y); ctx.lineTo(tx, ty); ctx.stroke();
+      ctx.setLineDash([]); ctx.lineWidth = 1;
+      ctx.fillStyle = "#89dceb";
+      ctx.beginPath(); ctx.moveTo(tx, ty - 16); ctx.lineTo(tx + 11, ty - 12); ctx.lineTo(tx, ty - 8); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = "#11151e";
+      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(tx, ty - 16); ctx.stroke();
+    }
+  }
+
+  // Drag-select rectangle.
+  if (input.dragging) {
+    const x = Math.min(input.dragStart.x, input.dragEnd.x);
+    const y = Math.min(input.dragStart.y, input.dragEnd.y);
+    const w = Math.abs(input.dragEnd.x - input.dragStart.x);
+    const h = Math.abs(input.dragEnd.y - input.dragStart.y);
+    ctx.fillStyle = "rgba(137,180,250,0.15)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#89b4fa";
+    ctx.strokeRect(x, y, w, h);
+  }
+
+  // Building placement ghost.
+  if (state.placing) {
+    const def = BUILDING_TYPES[state.placing.type];
+    const rot = state.placing.rot || 0;
+    const { w, h } = buildingDims(state.placing.type, rot);
+    const { ax, ay } = cursorBuildAnchor(input.mouse.x, input.mouse.y, w, h);
+    const ok = placementValid(state.placing.type, ax, ay, rot);
+    const fill = ok ? "rgba(166,227,161,0.18)" : "rgba(243,139,168,0.20)";
+    const stroke = ok ? "rgba(166,227,161,0.9)" : "rgba(243,139,168,0.9)";
+    for (let dy = 0; dy < h; dy++)
+      for (let dx = 0; dx < w; dx++)
+        drawTileHighlight(ax + dx, ay + dy, fill, stroke);
+    drawBuilding({ tx: ax, ty: ay, bw: w, bh: h, size: Math.max(w, h),
+                   color: def.color, tower: def.tower, gate: def.gate }, true);
+  }
+
+  // Vignette for a bit of mood.
+  const vg = ctx.createRadialGradient(
+    canvas.width / 2, canvas.height / 2, Math.min(canvas.width, canvas.height) * 0.35,
+    canvas.width / 2, canvas.height / 2, Math.max(canvas.width, canvas.height) * 0.75);
+  vg.addColorStop(0, "rgba(0,0,0,0)");
+  vg.addColorStop(1, "rgba(0,0,0,0.45)");
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const selUnits = state.units.filter(u => u.selected);
+  const enemies = state.units.filter(u => u.team === "enemy").length;
+  let txt = `Selected: ${selUnits.length}  |  Enemies left: ${enemies}`;
+  if (selUnits.length === 1) {
+    const u = selUnits[0];
+    const w = u.weapon;
+    txt += `  |  ${u.type} Lv${u.level} (${Math.round((ACCURACY[u.level] || 0) * 100)}% acc)`
+         + `  HP ${Math.max(0, Math.ceil(u.hp))}/${u.maxHp}`
+         + `  kills ${u.kills}`
+         + `  view ${u.view}  range ${w.range}  dmg ${w.damage}`;
+  }
+  statusEl.textContent = txt;
+
+  updateBuildMenu();
+}
+
+/* ------------------------------ LOOP ----------------------------------- */
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  updateCamera(dt);
+  updateProduction(dt);
+  updateSupport(dt);
+  updateCombat(dt);
+  updateAI(dt);
+  updateWorld(dt);
+  updateEffects(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+
+/* --------------------------- BUILD MENU (DOM) -------------------------- */
+const econEl = document.getElementById("econ");
+const structListEl = document.getElementById("structlist");
+const unitListEl = document.getElementById("unitlist");
+const prodEl = document.getElementById("prod");
+const selEl = document.getElementById("selinfo");
+const tabStruct = document.getElementById("tab-struct");
+const tabUnits = document.getElementById("tab-units");
+const structButtons = {};
+const unitButtons = {};
+let activeTab = "struct";
+let selRenderedId = null;
+
+function setTab(t) {
+  if (t === "units" && tabUnits.disabled) return;
+  activeTab = t;
+  tabStruct.classList.toggle("active", t === "struct");
+  tabUnits.classList.toggle("active", t === "units");
+  structListEl.style.display = t === "struct" ? "flex" : "none";
+  unitListEl.style.display = t === "units" ? "flex" : "none";
+  prodEl.style.display = t === "units" ? "block" : "none";
+  if (t !== "struct") state.placing = null;
+}
+
+function initBuildMenu() {
+  for (const key of BUILD_MENU) {
+    const def = BUILDING_TYPES[key];
+    const btn = document.createElement("button");
+    btn.className = "buildbtn";
+    const pwr = def.power ? ` · ${def.power > 0 ? "+" : ""}${def.power}⚡` : "";
+    btn.innerHTML = `<b>${def.name}</b><span>${def.size}×${def.size} · $${def.cost}${pwr}</span>`;
+    btn.addEventListener("click", () => {
+      if (btn.disabled) return;
+      state.placing = (state.placing && state.placing.type === key) ? null : { type: key, rot: 0 };
+    });
+    structListEl.appendChild(btn);
+    structButtons[key] = btn;
+  }
+  for (const key of UNIT_MENU) {
+    const def = UNIT_TYPES[key];
+    const btn = document.createElement("button");
+    btn.className = "buildbtn";
+    btn.innerHTML = `<b>${def.label || cap(key)}</b><span>$${def.cost} · ${def.buildTime}s</span>`;
+    btn.addEventListener("click", () => { if (!btn.disabled) queueUnit(key); });
+    unitListEl.appendChild(btn);
+    unitButtons[key] = btn;
+  }
+  tabStruct.addEventListener("click", () => setTab("struct"));
+  tabUnits.addEventListener("click", () => setTab("units"));
+  setTab("struct");
+}
+
+function updateBuildMenu() {
+  const p = powerBalance();
+  const low = p.consumed > p.produced;
+  const eng = hasEngineer();
+  const anyProducer = hasBuiltProducer("barracks") || hasBuiltProducer("garage");
+
+  econEl.innerHTML =
+    `<div>Credits: <b>$${Math.floor(state.credits)}</b></div>` +
+    `<div class="${low ? "low" : ""}">Power: ${p.produced} / ${p.consumed}${low ? " ⚠" : ""}</div>` +
+    (eng ? "" : `<div class="low">Need an Engineer</div>`);
+
+  for (const key of BUILD_MENU) {
+    const btn = structButtons[key];
+    const chainable = key === "wall" || key === "gate";
+    btn.disabled = !eng || (!chainable && constructingOfType(key));
+    btn.classList.toggle("active", !!state.placing && state.placing.type === key);
+  }
+
+  tabUnits.disabled = !anyProducer;
+  if (!anyProducer && activeTab === "units") setTab("struct");
+  const lbl = k => UNIT_TYPES[k].label || cap(k);
+  for (const key of UNIT_MENU) {
+    const producer = UNIT_TYPES[key].producer;
+    const full = state.queues[producer] && state.queues[producer].length >= 20;
+    unitButtons[key].disabled = !hasBuiltProducer(producer) || full;
+  }
+
+  // Production status per producer (Units tab).
+  if (!anyProducer) {
+    prodEl.innerHTML = `<div class="dim">Build a Barracks or Garage to train units.</div>`;
+  } else {
+    let html = "";
+    for (const producer of Object.keys(state.queues)) {
+      if (!hasBuiltProducer(producer)) continue;
+      const q = state.queues[producer];
+      if (!q.length) {
+        html += `<div class="dim">${cap(producer)}: idle</div>`;
+        continue;
+      }
+      const counts = {};
+      for (const t of q) counts[t] = (counts[t] || 0) + 1;
+      const list = UNIT_MENU.filter(k => counts[k]).map(k => `${lbl(k)} ×${counts[k]}`).join(", ");
+      html +=
+        `<div class="prodtitle">${cap(producer)}: ${lbl(q[0])} — ${q.length}/20</div>` +
+        `<div class="pbar"><div class="pfill" style="width:${Math.round(state.progress[producer] * 100)}%"></div></div>` +
+        `<div class="dim">${list}</div>`;
+    }
+    prodEl.innerHTML = html;
+  }
+
+  // Selected-building panel (Sell). Rebuild only when the selection changes so
+  // the Sell button stays clickable; refresh the HP line each frame.
+  const b = state.selectedBuilding;
+  if (b) {
+    if (selRenderedId !== b.id) {
+      selRenderedId = b.id;
+      const refund = Math.floor((b.cost || 0) * 0.5);
+      selEl.style.display = "block";
+      selEl.innerHTML =
+        `<div class="prodtitle">${b.name}</div>` +
+        `<div class="dim" id="selhp"></div>` +
+        (b.tower ? `<button id="evacbtn" class="sellbtn" style="border-color:#89dceb;color:#89dceb;background:#1a2a30">Evacuate</button>` : "") +
+        `<button id="sellbtn" class="sellbtn">Sell (+$${refund})</button>`;
+      document.getElementById("sellbtn").onclick = () => sellBuilding(b);
+      if (b.tower) document.getElementById("evacbtn").onclick = () => ejectGarrison(b);
+    }
+    const hpEl = document.getElementById("selhp");
+    if (hpEl) hpEl.textContent =
+      `HP ${Math.max(0, Math.ceil(b.hp))}/${b.maxHp}${b.built ? "" : " · building…"}` +
+      (b.tower ? ` · garrison ${b.garrison.length}/${b.cap}` : "");
+  } else if (selRenderedId !== null) {
+    selRenderedId = null;
+    selEl.style.display = "none";
+    selEl.innerHTML = "";
+  }
+}
+
+/* ------------------------------ INIT ----------------------------------- */
+function init() {
+  resize();
+  buildMap();
+  prerenderMap();
+  state.credits = ECONOMY.startCredits;
+  const start = spawnUnit(64, 64, { type: "vehicle", level: 3 }); // 64-65 x 64-65
+  spawnUnit(67, 65, { type: "soldier", level: 2 });
+  spawnUnit(68, 65, { type: "soldier", level: 2 });
+  spawnUnit(67, 67, { type: "soldier", level: 3 });
+  spawnUnit(66, 68, { type: "engineer" }); // your builder (orange)
+  spawnEnemies();
+  initBuildMenu();
+  centerCameraOn(start.tx, start.ty);
+  requestAnimationFrame(frame);
+}
+init();

@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Sprite Tool — Iso RTS</title>
+<style>
+  :root {
+    --bg:#0b0e14; --panel:#161a24; --panel2:#1e2331; --line:#2a3040;
+    --text:#e6e9ef; --dim:#8b93a7; --accent:#89b4fa; --good:#a6e3a1; --warn:#f9e2af; --bad:#f38ba8;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:13px/1.5 ui-sans-serif,system-ui,"Segoe UI",sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { margin:0; font-size:17px; letter-spacing:.06em; }
+  header p { margin:4px 0 0; color:var(--dim); font-size:12px; }
+  .wrap { display:grid; grid-template-columns:290px 1fr 340px; gap:0; height:calc(100vh - 62px); }
+  .col { overflow-y:auto; padding:14px; }
+  .col + .col { border-left:1px solid var(--line); }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.12em; color:var(--dim);
+       margin:0 0 10px; font-weight:600; }
+  h2 + h2 { margin-top:22px; }
+
+  /* catalogue */
+  .cat { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+  .cat button { background:var(--panel); border:1px solid var(--line); border-radius:7px;
+                padding:4px 2px 6px; cursor:pointer; color:var(--text); text-align:center; }
+  .cat button:hover { border-color:var(--accent); }
+  .cat button.on { border-color:var(--accent); background:#1d2740; }
+  .cat canvas { display:block; margin:0 auto; image-rendering:pixelated; }
+  .cat .f { font-size:10px; color:var(--dim); margin-top:2px; word-break:break-all; }
+  .cat .n { font-size:10px; color:var(--text); }
+  .kindrow { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:10px; }
+  .kindrow button { font-size:11px; padding:3px 8px; border-radius:20px; cursor:pointer;
+                    background:var(--panel); border:1px solid var(--line); color:var(--dim); }
+  .kindrow button.on { color:var(--text); border-color:var(--accent); }
+
+  /* preview */
+  .stage { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+           padding:10px; display:flex; justify-content:center; }
+  #preview { image-rendering:pixelated; }
+  .facegrid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:12px; }
+  .facegrid figure { margin:0; background:var(--panel); border:1px solid var(--line);
+                     border-radius:8px; padding:6px; text-align:center; }
+  .facegrid canvas { image-rendering:pixelated; }
+  .facegrid figcaption { font-size:10px; color:var(--dim); margin-top:4px; }
+  .meta { margin-top:12px; font-size:12px; color:var(--dim); }
+  .meta b { color:var(--text); font-weight:600; }
+  .badge { display:inline-block; padding:1px 7px; border-radius:20px; font-size:11px;
+           border:1px solid var(--line); margin-right:5px; }
+  .badge.good { color:var(--good); border-color:#2f5535; }
+  .badge.warn { color:var(--warn); border-color:#5a4d24; }
+
+  /* controls */
+  label.ctl { display:grid; grid-template-columns:74px 1fr 46px; gap:8px; align-items:center;
+              margin-bottom:7px; font-size:12px; }
+  label.ctl span:first-child { color:var(--dim); }
+  label.ctl output { text-align:right; font-variant-numeric:tabular-nums; color:var(--text); }
+  input[type=range] { width:100%; accent-color:var(--accent); }
+
+  /* assignments */
+  table.assign { width:100%; border-collapse:collapse; }
+  table.assign td { padding:4px 3px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  table.assign td:first-child { color:var(--text); white-space:nowrap; }
+  table.assign select { width:100%; background:var(--panel2); color:var(--text);
+                        border:1px solid var(--line); border-radius:5px; padding:3px; font-size:12px; }
+  table.assign canvas { image-rendering:pixelated; vertical-align:middle; }
+
+  pre { background:#0d1017; border:1px solid var(--line); border-radius:8px; padding:11px;
+        overflow-x:auto; font-size:11.5px; line-height:1.5; color:#cdd6f4; margin:0; }
+  .btn { background:var(--accent); color:#0b0e14; border:0; border-radius:7px; padding:7px 13px;
+         font-weight:600; cursor:pointer; font-size:12px; }
+  .btn.ghost { background:transparent; color:var(--dim); border:1px solid var(--line); }
+  .row { display:flex; gap:8px; align-items:center; margin:10px 0; flex-wrap:wrap; }
+  .note { color:var(--dim); font-size:11.5px; }
+  .note code { color:var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Sprite Tool</h1>
+  <p>Browse the PixVoxel art, assign it to unit types, tune the placement, then paste the result into
+     <code>js/sprites.js</code>. Preview uses the game's own bake &amp; blit, so it matches exactly.</p>
+</header>
+
+<div class="wrap">
+  <!-- ---------------- catalogue ---------------- -->
+  <div class="col">
+    <h2>Art catalogue</h2>
+    <div class="kindrow" id="kinds"></div>
+    <div class="cat" id="cat"></div>
+  </div>
+
+  <!-- ---------------- preview ---------------- -->
+  <div class="col">
+    <h2>Preview <span id="pvname" style="color:var(--text);text-transform:none;letter-spacing:0"></span></h2>
+    <div class="stage"><canvas id="preview" width="560" height="260"></canvas></div>
+    <div class="meta" id="pvmeta"></div>
+    <div class="facegrid" id="faces"></div>
+  </div>
+
+  <!-- ---------------- controls + output ---------------- -->
+  <div class="col">
+    <h2>Assignments</h2>
+    <table class="assign" id="assign"></table>
+
+    <h2>Tuning <span id="tunefor" style="color:var(--text);text-transform:none;letter-spacing:0"></span></h2>
+    <div id="tuning"></div>
+
+    <h2>Result</h2>
+    <div class="row">
+      <button class="btn" id="copy">Copy SPRITE_DEFS</button>
+      <button class="btn ghost" id="reset">Reset to current</button>
+    </div>
+    <pre id="out"></pre>
+    <p class="note">Paste over the <code>SPRITE_DEFS</code> block near the top of
+       <code>js/sprites.js</code>. Anchors are measured from the art at runtime, so they're
+       not emitted — use <code>offX</code>/<code>offY</code> to nudge.</p>
+  </div>
+</div>
+
+<!-- The real game modules: the tool reuses their bake, anchor measurement and blit. -->
+<script src="js/config.js"></script>
+<script src="js/sprites.js"></script>
+<script>
+"use strict";
+/* =========================================================================
+ * Sprite tool. Deliberately reuses js/sprites.js (bakeSprite, blitSprite,
+ * spriteDef, spriteDir, SPRITE_CATALOG) rather than reimplementing them, so a
+ * preview here can never drift from what the game actually draws.
+ * ========================================================================= */
+
+const TEAM = "player";                      // preview colour set (color6)
+const $ = id => document.getElementById(id);
+
+// Working copy of the assignments, seeded from the live SPRITE_DEFS.
+let defs = JSON.parse(JSON.stringify(SPRITE_DEFS));
+let selectedType = Object.keys(defs)[0] || UNIT_MENU[0];
+let kindFilter = "all";
+
+/* ------------------------- small async helpers ------------------------- */
+function imgFor(file, face, frame) {
+  return loadSprite(`${SPRITE_ROOT}/${SPRITE_TEAM_COLOR[TEAM]}/${file}_Large_face${face}_${frame}.png`);
+}
+// NB: addEventListener, not img.onload — the catalogue, the assignment thumbs
+// and the frame strip all wait on the SAME cached Image, and assigning onload
+// lets whichever runs last silently cancel the others.
+function whenLoaded(img) {
+  return new Promise(res => {
+    if (img.complete) return res(img);
+    const done = () => res(img);
+    img.addEventListener("load", done, { once: true });
+    img.addEventListener("error", done, { once: true });
+  });
+}
+
+// How many of the four files for a face are actually different? The pack often
+// ships duplicates, and animating those is pure waste — this is the check that
+// tells you whether `frames` above 1 buys anything.
+const distinctCache = new Map();
+async function distinctFrames(file) {
+  if (distinctCache.has(file)) return distinctCache.get(file);
+  const sigs = new Set();
+  for (let f = 0; f < 4; f++) {
+    const img = await whenLoaded(imgFor(file, 0, f));
+    if (!img.naturalWidth) continue;
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const x = c.getContext("2d", { willReadFrequently: true });
+    x.drawImage(img, 0, 0);
+    const d = x.getImageData(0, 0, c.width, c.height).data;
+    let hash = 2166136261;                        // FNV-1a over the pixels
+    for (let i = 0; i < d.length; i += 7) { hash ^= d[i]; hash = Math.imul(hash, 16777619); }
+    sigs.add(hash >>> 0);
+  }
+  const n = sigs.size || 1;
+  distinctCache.set(file, n);
+  return n;
+}
+
+/* ------------------------------ catalogue ------------------------------ */
+function buildKinds() {
+  const kinds = ["all", ...new Set(SPRITE_CATALOG.map(c => c.kind))];
+  $("kinds").innerHTML = "";
+  for (const k of kinds) {
+    const b = document.createElement("button");
+    b.textContent = k;
+    b.className = k === kindFilter ? "on" : "";
+    b.onclick = () => { kindFilter = k; buildKinds(); buildCatalog(); };
+    $("kinds").appendChild(b);
+  }
+}
+
+function buildCatalog() {
+  const host = $("cat");
+  host.innerHTML = "";
+  const cur = defs[selectedType] && defs[selectedType].unit;
+  for (const c of SPRITE_CATALOG) {
+    if (kindFilter !== "all" && c.kind !== kindFilter) continue;
+    const b = document.createElement("button");
+    if (c.file === cur) b.className = "on";
+    b.title = `${c.name}  (${c.file})`;
+    const cv = document.createElement("canvas");
+    cv.width = 60; cv.height = 74;
+    b.appendChild(cv);
+    const n = document.createElement("div"); n.className = "n"; n.textContent = c.name;
+    const f = document.createElement("div"); f.className = "f"; f.textContent = c.file;
+    b.appendChild(n); b.appendChild(f);
+    b.onclick = () => { assignArt(selectedType, c.file); };
+    host.appendChild(b);
+
+    whenLoaded(imgFor(c.file, 0, 0)).then(img => {
+      if (!img.naturalWidth) return;
+      const x = cv.getContext("2d");
+      x.imageSmoothingEnabled = true; x.imageSmoothingQuality = "high";
+      x.drawImage(img, 0, 0, cv.width, cv.height);
+    });
+  }
+}
+
+/* ----------------------------- assignments ----------------------------- */
+function assignArt(type, file) {
+  if (!defs[type]) defs[type] = {};
+  defs[type].unit = file;
+  distinctFrames(file).then(n => {
+    // Default `frames` to what the art actually contains, so nobody re-treads
+    // the "four identical files" trap.
+    defs[type].frames = n > 1 ? 4 : 1;
+    refresh();
+  });
+  refresh();
+}
+function unassign(type) { delete defs[type]; if (selectedType === type) selectedType = Object.keys(defs)[0] || type; refresh(); }
+
+function buildAssign() {
+  const t = $("assign");
+  t.innerHTML = "";
+  for (const type of UNIT_MENU) {
+    const tr = document.createElement("tr");
+    const label = (UNIT_TYPES[type] && UNIT_TYPES[type].label) || type;
+
+    const tdThumb = document.createElement("td");
+    tdThumb.style.width = "34px";
+    const cv = document.createElement("canvas"); cv.width = 30; cv.height = 36;
+    tdThumb.appendChild(cv);
+
+    const tdName = document.createElement("td");
+    tdName.textContent = label;
+    tdName.style.cursor = "pointer";
+    tdName.onclick = () => { selectedType = type; refresh(); };
+    if (type === selectedType) tdName.style.color = "var(--accent)";
+
+    const tdSel = document.createElement("td");
+    const sel = document.createElement("select");
+    const none = document.createElement("option");
+    none.value = ""; none.textContent = "— procedural —";
+    sel.appendChild(none);
+    for (const c of SPRITE_CATALOG) {
+      const o = document.createElement("option");
+      o.value = c.file; o.textContent = c.name;
+      sel.appendChild(o);
+    }
+    sel.value = defs[type] ? defs[type].unit : "";
+    sel.onchange = () => {
+      selectedType = type;
+      if (sel.value) assignArt(type, sel.value); else unassign(type);
+    };
+    tdSel.appendChild(sel);
+
+    tr.append(tdThumb, tdName, tdSel);
+    t.appendChild(tr);
+
+    if (defs[type]) {
+      whenLoaded(imgFor(defs[type].unit, 0, 0)).then(img => {
+        if (!img.naturalWidth) return;
+        const x = cv.getContext("2d");
+        x.imageSmoothingEnabled = true; x.imageSmoothingQuality = "high";
+        x.drawImage(img, 0, 0, cv.width, cv.height);
+      });
+    }
+  }
+}
+
+/* ------------------------------- tuning -------------------------------- */
+const CONTROLS = [
+  { key: "scale",     min: 0.2,  max: 2,   step: 0.05, label: "scale" },
+  { key: "offX",      min: -12,  max: 12,  step: 1,    label: "offset X" },
+  { key: "offY",      min: -12,  max: 12,  step: 1,    label: "offset Y" },
+  { key: "frames",    min: 1,    max: 4,   step: 1,    label: "frames" },
+  { key: "fps",       min: 1,    max: 16,  step: 1,    label: "fps" },
+  { key: "bob",       min: 0,    max: 4,   step: 1,    label: "step bob px" },
+  { key: "bobStride", min: 0.1,  max: 1.2, step: 0.05, label: "bob stride" },
+  { key: "turnMargin",min: 0,    max: 0.7, step: 0.02, label: "turn margin" },
+  { key: "gunY",      min: 0,    max: 0.9, step: 0.01, label: "muzzle height" },
+];
+
+function buildTuning() {
+  const host = $("tuning");
+  host.innerHTML = "";
+  $("tunefor").textContent = defs[selectedType]
+    ? `· ${(UNIT_TYPES[selectedType] && UNIT_TYPES[selectedType].label) || selectedType}` : "";
+  if (!defs[selectedType]) {
+    host.innerHTML = `<p class="note">No art assigned to this unit — it draws the procedural body.</p>`;
+    return;
+  }
+  const def = spriteDef(selectedType);
+  for (const c of CONTROLS) {
+    const l = document.createElement("label"); l.className = "ctl";
+    const s = document.createElement("span"); s.textContent = c.label;
+    const r = document.createElement("input");
+    r.type = "range"; r.min = c.min; r.max = c.max; r.step = c.step; r.value = def[c.key];
+    const o = document.createElement("output"); o.textContent = def[c.key];
+    r.oninput = () => {
+      defs[selectedType][c.key] = parseFloat(r.value);
+      o.textContent = r.value;
+      // Scale changes invalidate every baked frame for this art.
+      if (c.key === "scale") for (const k of [...spriteBaked.keys()]) spriteBaked.delete(k);
+      emit();
+    };
+    l.append(s, r, o);
+    host.appendChild(l);
+  }
+}
+
+/* ------------------------------- preview -------------------------------- */
+// A fake unit good enough for drawUnitSprite's inputs.
+const dummy = { type: null, team: TEAM, facing: 0, moving: true, walkPhase: 0 };
+
+function drawTile(x, cx, cy) {
+  x.beginPath();
+  x.moveTo(cx, cy - HALF_H); x.lineTo(cx + HALF_W, cy);
+  x.lineTo(cx, cy + HALF_H); x.lineTo(cx - HALF_W, cy); x.closePath();
+  x.fillStyle = "#3f6b3a"; x.fill();
+  x.strokeStyle = "rgba(0,0,0,0.25)"; x.stroke();
+}
+
+function drawPreview(ts) {
+  const cv = $("preview"), x = cv.getContext("2d");
+  x.clearRect(0, 0, cv.width, cv.height);
+  x.fillStyle = "#11151e"; x.fillRect(0, 0, cv.width, cv.height);
+
+  const type = selectedType, d = defs[type];
+  if (!d) { requestAnimationFrame(drawPreview); return; }
+  const def = spriteDef(type);
+
+  // Four stations, one per facing, each walking on the spot.
+  const angles = [Math.PI / 4, 3 * Math.PI / 4, 5 * Math.PI / 4, 7 * Math.PI / 4];
+  const names = ["SE ↘", "SW ↙", "NW ↖", "NE ↗"];
+  const walking = true;
+  for (let i = 0; i < 4; i++) {
+    const cx = 80 + i * 133, cy = 180;
+    drawTile(x, cx, cy);
+    // selection ring, exactly as render.js draws it (radius 11 soldier)
+    x.setLineDash([5, 4]); x.strokeStyle = "#a6e3a1"; x.lineWidth = 2;
+    x.beginPath(); x.ellipse(cx, cy + 3, 17, 8.6, 0, 0, Math.PI * 2); x.stroke();
+    x.setLineDash([]); x.lineWidth = 1;
+
+    const u = Object.assign({}, dummy, {
+      type, facing: angles[i], moving: walking, walkPhase: (ts / 1000) * 1.6,
+    });
+    const bucket = spriteDir(def, u.facing, null);
+    const frame = def.frames > 1 ? Math.floor(ts / 1000 * def.fps) % def.frames : 0;
+    const baked = bakeSprite(spritePath(def, TEAM, spriteFace(def, bucket), frame), def);
+    if (baked) blitSprite(x, baked, def, cx, cy, spriteBob(u, def));
+
+    x.fillStyle = "#8b93a7"; x.font = "11px sans-serif"; x.textAlign = "center";
+    x.fillText(names[i], cx, 232);
+    x.textAlign = "left";
+  }
+  requestAnimationFrame(drawPreview);
+}
+
+function buildFaces() {
+  const host = $("faces");
+  host.innerHTML = "";
+  const d = defs[selectedType];
+  if (!d) return;
+  const def = spriteDef(selectedType);
+  for (let f = 0; f < def.frames; f++) {
+    const fig = document.createElement("figure");
+    const cv = document.createElement("canvas");
+    cv.width = 88; cv.height = 108;
+    fig.appendChild(cv);
+    const cap = document.createElement("figcaption");
+    cap.textContent = `frame ${f}`;
+    fig.appendChild(cap);
+    host.appendChild(fig);
+    whenLoaded(imgFor(d.unit, 0, f)).then(img => {
+      if (img.naturalWidth) cv.getContext("2d").drawImage(img, 0, 0);
+    });
+  }
+}
+
+async function buildMeta() {
+  const d = defs[selectedType];
+  const m = $("pvmeta");
+  $("pvname").textContent = d
+    ? `· ${(SPRITE_CATALOG.find(c => c.file === d.unit) || {}).name || d.unit}` : "";
+  if (!d) { m.innerHTML = ""; return; }
+  const n = await distinctFrames(d.unit);
+  const def = spriteDef(selectedType);
+  const path = spritePath(def, TEAM, 0, 0);
+  const baked = bakeSprite(path, def);
+  const anchor = baked
+    ? `measured ground point <b>${baked.ax.toFixed(3)}, ${baked.ay.toFixed(3)}</b>${baked.measured ? "" : " (fallback)"}`
+    : "…";
+  m.innerHTML =
+    (n > 1
+      ? `<span class="badge good">${n} distinct frames — real animation</span>`
+      : `<span class="badge warn">all 4 files identical — static art, keep frames: 1</span>`) +
+    `<span class="badge">drawn ${baked ? baked.w + "×" + baked.h : "?"} px</span>` +
+    `<br>${anchor}` +
+    `<br>The pack has <b>no walk cycle</b> for any unit — the step bob above stands in for one.`;
+}
+
+/* -------------------------------- output -------------------------------- */
+function emit() {
+  const lines = ["const SPRITE_DEFS = {"];
+  for (const type of UNIT_MENU) {
+    const d = defs[type];
+    if (!d) continue;
+    const base = spriteDef(type);
+    const parts = [`unit: ${JSON.stringify(d.unit)}`];
+    for (const c of CONTROLS) {
+      const v = d[c.key];
+      if (v === undefined) continue;
+      if (v === SPRITE_DEFAULTS[c.key]) continue;      // only emit overrides
+      parts.push(`${c.key}: ${v}`);
+    }
+    lines.push(`  ${type}: { ${parts.join(", ")} },`);
+  }
+  lines.push("};");
+  $("out").textContent = lines.join("\n");
+}
+
+function refresh() { buildKinds(); buildCatalog(); buildAssign(); buildTuning(); buildFaces(); buildMeta(); emit(); }
+
+$("copy").onclick = () => {
+  navigator.clipboard.writeText($("out").textContent).then(() => {
+    $("copy").textContent = "Copied ✓";
+    setTimeout(() => { $("copy").textContent = "Copy SPRITE_DEFS"; }, 1200);
+  });
+};
+$("reset").onclick = () => { defs = JSON.parse(JSON.stringify(SPRITE_DEFS)); refresh(); };
+
+refresh();
+requestAnimationFrame(drawPreview);
+</script>
+</body>
+</html>

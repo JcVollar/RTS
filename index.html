@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Iso RTS Prototype</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <!-- Start menu: pick a game mode. -->
+  <div id="menu">
+    <div class="menucard">
+      <h1>ISO&nbsp;RTS</h1>
+      <p>Choose a game mode</p>
+      <div id="modelist"></div>
+    </div>
+  </div>
+
+  <!-- End screen (Survival win/lose). -->
+  <div id="gameover">
+    <div class="menucard">
+      <h1 id="goTitle">Main House Lost</h1>
+      <p id="goStats"></p>
+      <button id="goAgain" class="modebtn goagain">Back to menu</button>
+    </div>
+  </div>
+
+  <div id="hud">
+    <div id="help">
+      <div><b>Iso RTS</b> — prototype</div>
+      <div>Left-click a unit or drag a box to select</div>
+      <div>Left-click ground to move, or an enemy to attack</div>
+      <div>Right-drag to pan the map (also WASD / arrows)</div>
+      <div>Right-click to deselect all</div>
+      <div>Medics heal nearby infantry and Engineers fix nearby vehicles automatically</div>
+      <div>Hospital heals infantry &amp; Garage repairs vehicles within a 5-tile aura</div>
+      <div>Only the Main House needs an Engineer; other structures just build near your base</div>
+      <div>Barracks trains infantry, Garage builds tanks (Units tab)</div>
+      <div>Build an Ore Refinery for a free Ore Miner; it auto-harvests gold patches for credits</div>
+      <div>Select a Miner → click a gold ore patch to send it there (click ground to reposition)</div>
+      <div>Select soldiers → click a Guard Tower to garrison; select tower → Evacuate</div>
+      <div>Select a Barracks/Garage, right-drag to set the rally point</div>
+      <div>Gate: press Space while placing to rotate · your units pass, enemies don't</div>
+      <div>Double-click a unit to select all of that type on screen (Shift: whole map)</div>
+      <div>Main House must be placed next to an Engineer — the build zone is shown while placing</div>
+      <div>Low power halts unit training; build a Power Plant to resume</div>
+      <div>Ctrl+H: center on Main House · Ctrl+1–0: set group · 1–0: select group</div>
+      <div>Press <b>?</b> to toggle these controls</div>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div id="buildbar">
+    <div id="buildtitle">BUILD</div>
+    <div id="econ"></div>
+    <div id="tabs">
+      <button id="tab-struct" class="tab active">Structures</button>
+      <button id="tab-units" class="tab">Units</button>
+    </div>
+    <div id="structlist" class="buildlist"></div>
+    <div id="unitlist" class="buildlist"></div>
+    <div id="prod"></div>
+    <div id="selinfo"></div>
+    <div id="buildhint">Structures: pick, then left-click to place (Esc cancels).<br>Click a building to select &amp; sell.<br><b>Right-click a build button to cancel</b> (queued unit or building under construction).</div>
+  </div>
+
+  <!-- Plain scripts in dependency order (no build step needed). -->
+  <script src="js/config.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/canvas.js"></script>
+  <script src="js/entities.js"></script>
+  <script src="js/state.js"></script>
+  <script src="js/pathfinding.js"></script>
+  <script src="js/camera.js"></script>
+  <script src="js/picking.js"></script>
+  <script src="js/movement.js"></script>
+  <script src="js/ai.js"></script>
+  <script src="js/combat.js"></script>
+  <script src="js/buildings.js"></script>
+  <script src="js/support.js"></script>
+  <script src="js/harvest.js"></script>
+  <script src="js/input.js"></script>
+  <script src="js/sprites.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/gamemodes.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+These are the depths for the various terrain tiles.
+When drawing a unit standing or flying on top of terrain,
+ multiply the depth by 3 to get the number of pixels to offset
+ the unit's current y position by (higher depth == higher up).
+
+Plains: 1
+Forest: 3
+Desert: 1
+Jungle: 3
+Hills: 5
+Mountains: 6
+Ruins: 4
+Tundra: 2
+Road: 1
+River: 1
+Basement (for below buildings): 4
+Sea: 1
